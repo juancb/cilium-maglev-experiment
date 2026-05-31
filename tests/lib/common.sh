@@ -48,13 +48,14 @@ wait_node_bgp() {
 # wait until the VIP is a multipath route at the leaf (leaf has per-node ECMP; drops when a
 # node fails, restores when it recovers — more reliable signal than spine-level ECMP)
 wait_vip_ecmp() {
-  local tries="${1:-60}"
-  for _ in $(seq 1 "$tries"); do
+  # arg = max seconds to wait (old arg was tries with 2s sleep; now 1s sleep so pass 2× old value)
+  local max_secs="${1:-120}"
+  for _ in $(seq 1 "$max_secs"); do
     local n
     # FRR 9.1 format: "* 10.3.1.1, via eth4, weight 1" (nexthop before "via")
     n=$(frr "${LEAVES[0]}" "show ip route ${VIP}/32" 2>/dev/null | grep -cE '^\s+\* 10\.' || true)
     [ "${n:-0}" -ge 2 ] && return 0
-    sleep 2
+    sleep 1
   done
   return 1
 }

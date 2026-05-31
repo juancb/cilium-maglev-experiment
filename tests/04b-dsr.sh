@@ -82,7 +82,7 @@ run_cell() {
   docker start "$FAIL_SPINE" >/dev/null 2>&1 || true
   bash "${REPO_ROOT}/scripts/fix-node-veths.sh" "$FAIL_SPINE" 2>/dev/null || true
   docker exec -d "$FAIL_SPINE" bash /opt/startup.sh 2>/dev/null || true
-  wait_vip_ecmp 30 || yellow "  INFO: VIP ECMP not fully reconverged"
+  wait_vip_ecmp 60 || yellow "  INFO: VIP ECMP not fully reconverged"
 
   docker exec "$CLIENT" rm -f /tmp/${tag}.json /tmp/${tag}.ready 2>/dev/null || true
   docker exec -d "$CLIENT" python3 /opt/flowgen/flowgen.py \

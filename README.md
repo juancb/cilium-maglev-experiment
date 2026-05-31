@@ -53,6 +53,11 @@ SONiC↔Arista↔SAI consistent-hashing mapping: [docs/APPENDIX-A-arista-mapping
 
 ## Run
 
+> **Important:** always use `make up` / `make down` (or `bash scripts/bring-up.sh` / `bash scripts/tear-down.sh`
+> directly as root in WSL). Never run `containerlab deploy` by hand — the ext-container node
+> containers must be created by `start-nodes.sh` first, and the deploy must be killed once veth
+> pairs appear. `bring-up.sh` handles all of this automatically.
+
 ```bash
 make up              # deploy topology, bring up k3s+Cilium(maglev) on each node, apply demo app
 make test-fabric     # Test 1: BGP up, ECMP present, per-flow (not per-packet) hash, ToR CH on vs off

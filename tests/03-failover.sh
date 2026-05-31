@@ -29,8 +29,10 @@ set_backends() {
 
 wait_cilium_ready() {
   local tries="${1:-90}"
+  # 1s polling: same total timeout (tries × 1s vs old tries × 3s) but 3× more responsive
+  local max_secs=$(( tries * 3 ))
   info "waiting for all nodes Ready + Cilium 1/1..."
-  for _ in $(seq 1 "$tries"); do
+  for _ in $(seq 1 "$max_secs"); do
     local nodes_not_ready cilium_not_ready
     nodes_not_ready=$(docker exec "$N1" k3s kubectl get nodes --no-headers 2>/dev/null \
       | grep -cv ' Ready ' || true)
@@ -38,7 +40,7 @@ wait_cilium_ready() {
       -l app.kubernetes.io/name=cilium-agent --no-headers 2>/dev/null \
       | grep -cv '1/1.*Running' || true)
     [ "${nodes_not_ready:-1}" -eq 0 ] && [ "${cilium_not_ready:-1}" -eq 0 ] && return 0
-    sleep 3
+    sleep 1
   done
   yellow "  WARNING: cluster not fully ready after wait"
   return 1
@@ -48,25 +50,28 @@ set_maglev() {
   local mode="$1"  # on|off
   local vals="cilium-values-maglev.yaml"; [ "$mode" = off ] && vals="cilium-values-nomaglev.yaml"
   # Wait for Cilium to be stable before upgrading (node2 may still be recovering)
-  wait_cilium_ready 90 || true
+  wait_cilium_ready 30 || true
   info "switching Maglev ${mode} (helm upgrade ${vals})"
   docker exec -e KUBECONFIG=/etc/rancher/k3s/k3s.yaml "$N1" \
       helm upgrade cilium cilium/cilium -n kube-system \
       -f "${HELM_VALUES_DIR}/${vals}" --reuse-values >/dev/null
-  # helm upgrade triggers a rolling update; no need for explicit rollout restart.
-  # Just wait for the rollout to complete, force-deleting any stuck Terminating pods.
-  for _ in $(seq 1 6); do
-    sleep 10
+  sleep 5   # give helm time to trigger the rolling restart
+  # check every 2s; force-delete any Terminating pod immediately; 60 tries × 2s = 120s max
+  for _ in $(seq 1 60); do
+    sleep 2
     for stuck in $(docker exec "$N1" k3s kubectl -n kube-system get pods \
         -l app.kubernetes.io/name=cilium-agent --no-headers 2>/dev/null \
         | awk '/Terminating/{print $1}'); do
       docker exec "$N1" k3s kubectl -n kube-system delete pod "$stuck" --force --grace-period=0 2>/dev/null || true
       yellow "  force-deleted stuck pod: $stuck"
     done
+    cilium_not_ready=$(docker exec "$N1" k3s kubectl -n kube-system get pods \
+      -l app.kubernetes.io/name=cilium-agent --no-headers 2>/dev/null \
+      | grep -cv '1/1.*Running' || true)
+    [ "${cilium_not_ready:-1}" -eq 0 ] && break
   done
-  # Wait for ALL nodes including node2 — node2 must be forwarding before flows start.
-  wait_cilium_ready 120 || yellow "  WARNING: Cilium not fully ready; results may be skewed"
-  sleep 3
+  # Final gate — node2 must be forwarding before flows start.
+  wait_cilium_ready 60 || yellow "  WARNING: Cilium not fully ready; results may be skewed"
 }
 
 set_ch() {
@@ -113,7 +118,7 @@ run_cell() {
   # Restore the failed node (idempotent: if already up and wired, this is a no-op).
   restore_fail_node
   wait_cilium_ready 60 || yellow "  INFO: Cilium not fully ready before run"
-  wait_vip_ecmp 30 || yellow "  INFO: VIP ECMP not fully reconverged before run"
+  wait_vip_ecmp 60 || yellow "  INFO: VIP ECMP not fully reconverged before run"
   set_ch "$ch"
 
   # start N flows; wait until established

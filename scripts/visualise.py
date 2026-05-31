@@ -147,7 +147,7 @@ def make_backend_dist_png(stats: dict, out_path: Path):
     for tag, s in stats.items():
         bc = {}
         for f in s["flows"]:
-            b = f.get("backend", "unknown")
+            b = f.get("backend") or "unknown"
             bc[b] = bc.get(b, 0) + 1
         backend_counts[tag] = bc
 

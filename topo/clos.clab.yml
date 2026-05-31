@@ -1,5 +1,6 @@
 # Cilium Maglev × switch consistent-hashing lab — containerlab topology.
-# Run from WSL2:  sudo containerlab deploy -t topo/clos.clab.yml
+# DO NOT run containerlab deploy directly — use:  bash scripts/bring-up.sh  (or: make up)
+# The ext-container nodes must be created by start-nodes.sh BEFORE containerlab can wire veths.
 #
 # Tiers (see docs/ADDRESSING.md):
 #   client ── tor(SONiC) ──3x── spine1/2/3(FRR) ──mesh── leaf1/2(FRR) ──── node1/2/3 (k3s+bird+cilium)

@@ -3,7 +3,6 @@
 
 SHELL := /bin/bash
 TOPO  := topo/clos.clab.yml
-CLAB  := sudo containerlab
 
 .PHONY: help images up down redeploy test test-fabric test-cilium test-failover sweep status
 
@@ -29,8 +28,7 @@ up:
 	bash scripts/bring-up.sh
 
 down:
-	$(CLAB) destroy -t $(TOPO) 2>/dev/null || true
-	docker rm -f clab-maglev-clos-node1 clab-maglev-clos-node2 clab-maglev-clos-node3 2>/dev/null || true
+	bash scripts/tear-down.sh
 
 redeploy: down up
 
@@ -49,4 +47,4 @@ sweep:
 	bash scripts/sweep.sh
 
 status:
-	$(CLAB) inspect -t $(TOPO)
+	CLAB_VERSION_CHECK=disable containerlab inspect -t $(TOPO)

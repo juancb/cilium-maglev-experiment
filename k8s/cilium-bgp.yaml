@@ -33,7 +33,6 @@ spec:
     restartTimeSeconds: 30
   transport:
     peerPort: 179
-    sourceInterface: k8s
   families:
     - afi: ipv4
       safi: unicast
