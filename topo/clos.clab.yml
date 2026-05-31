@@ -20,17 +20,17 @@ topology:
       image: quay.io/frrouting/frr:9.1.0
 
   nodes:
-    # ---- ToR: the consistent-hashing switch -------------------------------------------------
+    # ---- ToR: forwarding switch (FRR, plain ECMP) -------------------------------------------
+    # Note: originally planned as SONiC with FG_NHG consistent-hashing (resilient ECMP), but
+    # sonic-vs's software ASIC bridging is incompatible with containerlab+native Docker on WSL2.
+    # Using FRR instead; switch-CH is stated analytically in docs/APPENDIX-A-arista-mapping.md.
+    # The Maglev on/off dimension is the primary experiment and is fully testable here.
     tor:
-      kind: sonic-vs
-      image: docker-sonic-vs:latest          # `docker load` the sonic-vs image first
-      # startup-config copies config_db.json into the container's writable layer before
-      # start.sh runs, so sonic-cfggen can overwrite it (bind-mount would block the mv).
-      startup-config: ../fabric/tor/config_db.json
+      kind: linux
+      group: spine
       binds:
-        - ../fabric/tor/ch-on.sh:/etc/sonic/ch-on.sh
-        - ../fabric/tor/ch-off.sh:/etc/sonic/ch-off.sh
-      # CH knob is applied at runtime via fabric/tor/ch-on.sh — see scripts.
+        - ../fabric/frr/tor.conf:/etc/frr/frr.conf
+        - ../fabric/frr/daemons:/etc/frr/daemons
 
     # ---- Spines (FRR) -----------------------------------------------------------------------
     spine1:
