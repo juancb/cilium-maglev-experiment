@@ -35,6 +35,22 @@ sysctl -w net.ipv4.ip_forward=1
 sysctl -w net.ipv4.conf.all.rp_filter=0
 sysctl -w net.ipv4.conf.default.rp_filter=0
 
+echo "[node${ID}] cgroupv2: clear subtree_control so k3s can create kubepods hierarchy"
+# cgroupv2 propagates domain controllers to child cgroups via subtree_control. If the root
+# has domain controllers set, any child cgroup (including kubepods) inherits them. When kubelet
+# then tries to have processes AND children under kubepods, it hits the "domain invalid" state.
+# Fix: clear subtree_control NOW — before any child cgroup is created — so kubepods inherits
+# no domain controllers. This must happen before bird starts (which would create a child cgroup).
+# Resource accounting is not needed for this experiment.
+if [ -f /sys/fs/cgroup/cgroup.subtree_control ]; then
+  CTLS=$(cat /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || true)
+  if [ -n "${CTLS:-}" ]; then
+    MINUS=$(echo "$CTLS" | sed 's/[^ ]*/\-&/g')
+    echo "${MINUS}" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || true
+    echo "[node${ID}] cgroupv2 subtree_control cleared (was: ${CTLS}; now: $(cat /sys/fs/cgroup/cgroup.subtree_control))"
+  fi
+fi
+
 echo "[node${ID}] bpf + cgroup2 mounts for Cilium"
 mount bpffs -t bpf /sys/fs/bpf 2>/dev/null || true
 mkdir -p /run/cilium/cgroupv2
