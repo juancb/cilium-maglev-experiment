@@ -24,11 +24,13 @@ topology:
     tor:
       kind: sonic-vs
       image: docker-sonic-vs:latest          # `docker load` the sonic-vs image first
+      # startup-config copies config_db.json into the container's writable layer before
+      # start.sh runs, so sonic-cfggen can overwrite it (bind-mount would block the mv).
+      startup-config: ../fabric/tor/config_db.json
       binds:
-        - ../fabric/tor/config_db.json:/etc/sonic/config_db.json
         - ../fabric/tor/ch-on.sh:/etc/sonic/ch-on.sh
         - ../fabric/tor/ch-off.sh:/etc/sonic/ch-off.sh
-      # CH knob is applied at runtime via fabric/tor/ch-on.sh (default) — see Makefile.
+      # CH knob is applied at runtime via fabric/tor/ch-on.sh — see scripts.
 
     # ---- Spines (FRR) -----------------------------------------------------------------------
     spine1:
