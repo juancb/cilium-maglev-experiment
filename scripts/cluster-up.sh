@@ -38,8 +38,8 @@ done
 
 info "waiting for 3 nodes to register"
 for _ in $(seq 1 90); do
-  c=$(kc get nodes --no-headers 2>/dev/null | wc -l || echo 0)
-  [ "${c:-0}" -ge 3 ] && break; sleep 3
+  c=$(kc get nodes --no-headers 2>/dev/null | grep -c . || true)
+  [ "${c:-0}" -ge 3 ] 2>/dev/null && break; sleep 3
 done
 kc get nodes -o wide || true
 

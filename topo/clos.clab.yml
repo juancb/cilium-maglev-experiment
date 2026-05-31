@@ -69,39 +69,15 @@ topology:
     # ---- Kubernetes nodes: k3s + host bird + Cilium -----------------------------------------
     # Built by nodes/Dockerfile (k3s + bird2 + tooling baked in).
     # containerlab runs all linux containers privileged by default — no explicit field needed.
+    # ---- Kubernetes nodes: k3s + host bird + Cilium -----------------------------------------
+    # Created manually by scripts/start-nodes.sh (--cgroupns=host, --privileged) BEFORE deploy.
+    # containerlab uses ext-container to wire fabric veth links to the pre-existing containers.
     node1:
-      kind: linux
-      image: maglev/k3s-bird:latest
-      group: knode
-      binds:
-        - ../nodes/bird/node1.conf:/etc/bird/bird.conf
-        - ../nodes/startup/node.sh:/opt/startup.sh
-        - ../k8s:/opt/k8s
-      env: { NODE_ID: "1" }
-      exec:
-        - bash -lc "bash /opt/startup.sh >/var/log/startup.log 2>&1 &"
+      kind: ext-container
     node2:
-      kind: linux
-      image: maglev/k3s-bird:latest
-      group: knode
-      binds:
-        - ../nodes/bird/node2.conf:/etc/bird/bird.conf
-        - ../nodes/startup/node.sh:/opt/startup.sh
-        - ../k8s:/opt/k8s
-      env: { NODE_ID: "2" }
-      exec:
-        - bash -lc "bash /opt/startup.sh >/var/log/startup.log 2>&1 &"
+      kind: ext-container
     node3:
-      kind: linux
-      image: maglev/k3s-bird:latest
-      group: knode
-      binds:
-        - ../nodes/bird/node3.conf:/etc/bird/bird.conf
-        - ../nodes/startup/node.sh:/opt/startup.sh
-        - ../k8s:/opt/k8s
-      env: { NODE_ID: "3" }
-      exec:
-        - bash -lc "bash /opt/startup.sh >/var/log/startup.log 2>&1 &"
+      kind: ext-container
 
     # ---- External client (FRR for BGP + flowgen mounted in) ---------------------------------
     client:

@@ -49,6 +49,14 @@ if [ -f /sys/fs/cgroup/cgroup.subtree_control ]; then
     echo "${MINUS}" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || true
     echo "[node${ID}] cgroupv2 subtree_control cleared (was: ${CTLS}; now: $(cat /sys/fs/cgroup/cgroup.subtree_control))"
   fi
+  # Pre-create kubepods hierarchy NOW while subtree_control is empty.
+  # kubepods inherits controllers from root's subtree_control at creation time.
+  # If we create it while stc=empty, kubepods gets stc=empty → k3s can enter it later
+  # even after containerd re-sets root's stc.
+  # Pre-create ONLY kubepods (no children). If we also create burstable/besteffort,
+  # kubepods will have children + inherited domain controllers from parent = domain invalid.
+  mkdir -p /sys/fs/cgroup/kubepods 2>/dev/null || true
+  echo "[node${ID}] kubepods cgroup pre-created (type: $(cat /sys/fs/cgroup/kubepods/cgroup.type 2>/dev/null), stc: '$(cat /sys/fs/cgroup/kubepods/cgroup.subtree_control 2>/dev/null)')"
 fi
 
 echo "[node${ID}] bpf + cgroup2 mounts for Cilium"
