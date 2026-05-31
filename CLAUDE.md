@@ -13,3 +13,13 @@ Virtual leaf-spine lab measuring the impact of Cilium **Maglev** consistent hash
   mangled. Don't inline multi-line scripts through the wsl bridge — run script *files*.
 - Repo at `/mnt/c/Users/Juan/Documents/Development/cilium-maglev-experiment`. Container names:
   `clab-maglev-clos-<node>`. Validate artifacts anytime with `bash scripts/preflight.sh`.
+
+## Docker setup
+- **Native Docker CE 29.5.2** is installed in WSL Ubuntu-24.04 and owns `/var/run/docker.sock`.
+  Docker Desktop's WSL proxy is superseded. All `docker` and `containerlab` commands in WSL use
+  the native daemon — bridges are visible via netlink (required for containerlab veth wiring).
+- Images must be in the native daemon. If lost after WSL restart, run:
+  `bash scripts/load-images-native.sh`  (loads sonic-vs from `/root/docker-sonic-vs.gz`,
+  pulls frr, rebuilds node/client images).
+- Bridge stubs are NOT needed with the native daemon (it creates real bridges).
+- `scripts/create-bridge-stubs.sh` is a legacy workaround, no longer required.
