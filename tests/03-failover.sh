@@ -51,9 +51,10 @@ run_cell() {
   local tag="ch-${ch}_maglev-${mag}"
   info "=== cell: CH ${ch} / Maglev ${mag} ==="
   # Restart the failed node and bring its network/bird back up.
-  # docker start restarts the container, but startup.sh must be re-run to restore
-  # interfaces and bird (they're not part of the container's entrypoint/CMD).
+  # docker start recreates the container netns, losing manually-placed veths;
+  # fix-node-veths.sh moves them back before startup.sh re-addresses them.
   docker start "$FAIL_SPINE" >/dev/null 2>&1 || true
+  bash "${REPO_ROOT}/scripts/fix-node-veths.sh" "$FAIL_SPINE" 2>/dev/null || true
   docker exec -d "$FAIL_SPINE" bash /opt/startup.sh 2>/dev/null || true
   wait_vip_ecmp 30 || yellow "  INFO: VIP ECMP not fully reconverged before run"
   set_ch "$ch"
@@ -74,6 +75,7 @@ run_cell() {
   docker stop "$FAIL_SPINE" >/dev/null
   sleep $((DUR > 20 ? DUR-15 : 10))     # let resets surface, leave margin before flowgen ends
   docker start "$FAIL_SPINE" >/dev/null
+  bash "${REPO_ROOT}/scripts/fix-node-veths.sh" "$FAIL_SPINE" 2>/dev/null || true
 
   # collect
   for _ in $(seq 1 30); do

@@ -1,0 +1,52 @@
+# Cilium Helm values — DSR + MAGLEV variant (Test 4B).
+#
+# loadBalancer.mode=dsr: ingress node DNAT's to backend pod but does NOT SNAT the
+# source — backend pod sees the original client IP (203.0.113.1) throughout the
+# connection. When a flow re-homes to a different ingress node after a failure,
+# Maglev on that node selects the same backend → backend has state for the original
+# client IP → TCP connection survives. This is the configuration that makes Maglev
+# observable: without it (SNAT mode) the source IP changes on re-home → RST.
+#
+# Expected in Test 4B: ~0% broken (Maglev selects same backend, pod has state)
+#
+# Install: helm upgrade cilium cilium/cilium -n kube-system -f k8s/cilium-values-dsr-maglev.yaml
+
+kubeProxyReplacement: true
+k8sServiceHost: 10.10.0.1
+k8sServicePort: 6443
+
+routingMode: native
+ipv4NativeRoutingCIDR: 10.244.0.0/16
+autoDirectNodeRoutes: false
+endpointRoutes:
+  enabled: true
+
+bpf:
+  masquerade: true                   # pod egress SNAT only — unrelated to service ingress
+
+ipam:
+  mode: cluster-pool
+  operator:
+    clusterPoolIPv4PodCIDRList:
+      - 10.244.0.0/16
+    clusterPoolIPv4MaskSize: 24
+
+# ---- the two knobs under test -------------------------------------------------------
+loadBalancer:
+  algorithm: maglev                  # consistent hashing — preserves backend across re-homing
+  mode: dsr                          # Direct Server Return — preserves client IP at backend
+  # dsrDispatch: ipopt               # default for native routing; switch to geneve if WSL2
+  #                                  # kernel strips IP options (symptom: no-Maglev cell = 0%)
+# -------------------------------------------------------------------------------------
+
+maglev:
+  tableSize: 16381
+  hashSeed: "JLfvgnHc2kaSUFaI"
+
+bgpControlPlane:
+  enabled: true
+
+operator:
+  replicas: 1
+hubble:
+  enabled: false

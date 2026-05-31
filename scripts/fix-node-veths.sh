@@ -10,6 +10,13 @@
 set -uo pipefail
 LAB="maglev-clos"
 
+# Optional: only rewire a specific node (e.g., "node2" or "clab-maglev-clos-node2").
+# When omitted, all three nodes are rewired.
+NODE_FILTER="${1:-}"
+NODE_FILTER="${NODE_FILTER#clab-${LAB}-}"  # strip prefix if caller passes full container name
+
+should_move() { [ -z "$NODE_FILTER" ] || [ "$NODE_FILTER" = "$1" ]; }
+
 move_veth() {
   local LEAF_CTR="clab-${LAB}-${1}"  # e.g. leaf1
   local LEAF_IFACE="$2"              # e.g. eth4
@@ -39,16 +46,14 @@ move_veth() {
   echo "    moved and renamed to ${NODE_IFACE}"
 }
 
-echo "=== moving fabric veths into node containers ==="
-move_veth leaf1 eth4 node1 fab0
-move_veth leaf2 eth4 node1 fab1
-move_veth leaf1 eth5 node2 fab0
-move_veth leaf2 eth5 node2 fab1
-move_veth leaf1 eth6 node3 fab0
-move_veth leaf2 eth6 node3 fab1
+echo "=== moving fabric veths into node containers${NODE_FILTER:+ (${NODE_FILTER} only)} ==="
+should_move node1 && { move_veth leaf1 eth4 node1 fab0; move_veth leaf2 eth4 node1 fab1; }
+should_move node2 && { move_veth leaf1 eth5 node2 fab0; move_veth leaf2 eth5 node2 fab1; }
+should_move node3 && { move_veth leaf1 eth6 node3 fab0; move_veth leaf2 eth6 node3 fab1; }
 
 echo "=== verifying ==="
 for n in node1 node2 node3; do
+  should_move "$n" || continue
   echo -n "  ${n}: "
   docker exec "clab-${LAB}-${n}" ip -br link show fab0 2>/dev/null | awk '{print "fab0="$2}' | tr -d '\n'
   docker exec "clab-${LAB}-${n}" ip -br link show fab1 2>/dev/null | awk '{print " fab1="$2}' | tr -d '\n'

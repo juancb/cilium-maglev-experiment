@@ -1,0 +1,46 @@
+# Cilium Helm values — DSR + RANDOM (no-Maglev) variant (Test 4B).
+#
+# Same as cilium-values-dsr-maglev.yaml but with random backend selection.
+# With DSR, the backend sees the original client IP — so when a flow re-homes
+# after a node failure, the new ingress picks a random backend. If that backend
+# differs from the original, the backend has no TCP state → RST.
+#
+# Expected in Test 4B: ~28% broken  (M=3 nodes, B=6 backends, ~1/3 re-home,
+# re-homed flows pick wrong backend with prob (B-1)/B ≈ 5/6 → ~1/3 × 5/6 ≈ 28%)
+#
+# Install: helm upgrade cilium cilium/cilium -n kube-system -f k8s/cilium-values-dsr-nomaglev.yaml
+
+kubeProxyReplacement: true
+k8sServiceHost: 10.10.0.1
+k8sServicePort: 6443
+
+routingMode: native
+ipv4NativeRoutingCIDR: 10.244.0.0/16
+autoDirectNodeRoutes: false
+endpointRoutes:
+  enabled: true
+
+bpf:
+  masquerade: true
+
+ipam:
+  mode: cluster-pool
+  operator:
+    clusterPoolIPv4PodCIDRList:
+      - 10.244.0.0/16
+    clusterPoolIPv4MaskSize: 24
+
+# ---- the two knobs under test -------------------------------------------------------
+loadBalancer:
+  algorithm: random                  # independent random selection per ingress node
+  mode: dsr                          # Direct Server Return — preserves client IP at backend
+  # dsrDispatch: ipopt               # default; switch to geneve if ipopt fails in WSL2
+# -------------------------------------------------------------------------------------
+
+bgpControlPlane:
+  enabled: true
+
+operator:
+  replicas: 1
+hubble:
+  enabled: false
