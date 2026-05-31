@@ -7,16 +7,17 @@
 #   Maglev on:  new ingress picks SAME backend (same 5-tuple, same hash) → pod has state → survives (~0%)
 #
 # Run scripts/probe-source-ip.sh first to confirm DSR is working (pod sees 203.0.113.1).
-# If the no-Maglev cell shows 0% broken, DSR is likely not working — try dsrDispatch=geneve
-# in the values files (WSL2 kernel may strip IP options).
+# If the no-Maglev cell shows 0% broken, DSR is likely not working — try dsrDispatch=geneve.
 #
 # Env knobs: N=<flows> (default 300)   DUR=<sec> (default 50)
 set -euo pipefail
 cd "$(dirname "$0")"
 . lib/common.sh
+SECONDS=0
 
 N="${N:-300}"; DUR="${DUR:-50}"
 N1="${PFX}-node1"
+FAIL_NODE="${PFX}-node2"
 HELM_VALUES_DIR="/opt/k8s"
 declare -A RESULT
 
@@ -26,8 +27,10 @@ set_cilium_values() {
   docker exec -e KUBECONFIG=/etc/rancher/k3s/k3s.yaml "$N1" \
       helm upgrade cilium cilium/cilium -n kube-system \
       -f "${HELM_VALUES_DIR}/${vals}" --reuse-values >/dev/null
+  step "triggering rolling restart of cilium DaemonSet"
   docker exec "$N1" k3s kubectl -n kube-system rollout restart ds/cilium >/dev/null
-  docker exec "$N1" k3s kubectl -n kube-system rollout status ds/cilium --timeout=180s >/dev/null
+  step "waiting for rollout to complete"
+  docker exec "$N1" k3s kubectl -n kube-system rollout status ds/cilium --timeout=180s 2>&1 | sed 's/^/  /'
   sleep 5
 }
 
@@ -37,12 +40,12 @@ cleanup() {
       helm upgrade cilium cilium/cilium -n kube-system \
       -f "${HELM_VALUES_DIR}/cilium-values-maglev.yaml" --reuse-values >/dev/null 2>&1 || true
   docker exec "$N1" k3s kubectl -n kube-system rollout restart ds/cilium >/dev/null 2>&1 || true
-  docker exec "$N1" k3s kubectl -n kube-system rollout status ds/cilium --timeout=120s >/dev/null 2>&1 || true
+  docker exec "$N1" k3s kubectl -n kube-system rollout status ds/cilium --timeout=120s 2>&1 | sed 's/^/  /' || true
 }
 trap cleanup EXIT
 
 probe_srcip() {
-  info "Probing source IP seen by backend pod (sanity check)..."
+  info "Probing source IP seen by backend pod (DSR sanity check)..."
   PROBE_PY="
 import socket, sys
 s = socket.socket()
@@ -79,27 +82,42 @@ run_cell() {
   local tag="$1"
   info "=== cell: ${tag} ==="
 
-  docker start "$FAIL_SPINE" >/dev/null 2>&1 || true
-  bash "${REPO_ROOT}/scripts/fix-node-veths.sh" "$FAIL_SPINE" 2>/dev/null || true
-  docker exec -d "$FAIL_SPINE" bash /opt/startup.sh 2>/dev/null || true
+  step "restoring ${FAIL_NODE}"
+  docker start "$FAIL_NODE" >/dev/null 2>&1 || true
+  bash "${REPO_ROOT}/scripts/fix-node-veths.sh" "$FAIL_NODE" 2>/dev/null || true
+  docker exec -d "$FAIL_NODE" bash /opt/startup.sh 2>/dev/null || true
   wait_vip_ecmp 60 || yellow "  INFO: VIP ECMP not fully reconverged"
 
+  step "starting ${N} flows (duration ${DUR}s)"
   docker exec "$CLIENT" rm -f /tmp/${tag}.json /tmp/${tag}.ready 2>/dev/null || true
   docker exec -d "$CLIENT" python3 /opt/flowgen/flowgen.py \
       --vip "$VIP" --port "$VIP_PORT" --count "$N" --duration "$DUR" \
       --out "/tmp/${tag}.json" --ready-file "/tmp/${tag}.ready"
+
+  local elapsed=0
   for _ in $(seq 1 30); do
-    docker exec "$CLIENT" test -f /tmp/${tag}.ready && break; sleep 1
+    docker exec "$CLIENT" test -f /tmp/${tag}.ready && break
+    sleep 1; elapsed=$(( elapsed + 1 ))
+    [ $(( elapsed % 5 )) -eq 0 ] && step "waiting for ${N} flows to establish... (${elapsed}s)"
   done
+  step "flows established; sleeping 3s before failure injection"
   sleep 3
 
   local failtime; failtime=$(date +%s)
-  info "stopping ${FAIL_SPINE}"
-  docker stop "$FAIL_SPINE" >/dev/null
-  sleep $((DUR > 20 ? DUR-15 : 10))
-  docker start "$FAIL_SPINE" >/dev/null
-  bash "${REPO_ROOT}/scripts/fix-node-veths.sh" "$FAIL_SPINE" 2>/dev/null || true
+  info "stopping ${FAIL_NODE}"
+  docker stop "$FAIL_NODE" >/dev/null
 
+  local wait_secs=$(( DUR > 20 ? DUR-15 : 10 ))
+  for i in $(seq 1 "$wait_secs"); do
+    sleep 1
+    [ $(( i % 5 )) -eq 0 ] && step "post-failure wait: ${i}/${wait_secs}s (collecting RSTs)"
+  done
+
+  step "restoring ${FAIL_NODE} after failure"
+  docker start "$FAIL_NODE" >/dev/null
+  bash "${REPO_ROOT}/scripts/fix-node-veths.sh" "$FAIL_NODE" 2>/dev/null || true
+
+  step "collecting results from flowgen"
   for _ in $(seq 1 30); do
     docker exec "$CLIENT" test -s /tmp/${tag}.json && break; sleep 1
   done
@@ -122,8 +140,9 @@ run_cell() {
 }
 
 info "Test 4B setup: N=${N} flows, DUR=${DUR}s, ETP=Cluster, 6 replicas"
+step "scaling echo to 6 replicas"
 kc -n default scale deploy/echo --replicas=6 >/dev/null 2>&1 || true
-kc -n default rollout status deploy/echo --timeout=120s >/dev/null
+kc -n default rollout status deploy/echo --timeout=120s 2>&1 | sed 's/^/  /'
 
 info "--- DSR + Maglev OFF ---"
 set_cilium_values "cilium-values-dsr-nomaglev.yaml"
@@ -148,6 +167,6 @@ if [ "${RESULT[dsr_maglev-off]:-?}" != "?" ] && \
    echo "${RESULT[dsr_maglev-off]}" | grep -qE '^\?|0/'; then
   yellow "WARNING: Maglev-off cell shows 0% — DSR may not be working."
   yellow "Try uncommenting dsrDispatch: geneve in k8s/cilium-values-dsr-*.yaml"
-  yellow "and re-running this test."
 fi
 echo "Raw JSON: ${RESULTS_DIR}/"
+green "Runtime: $(fmt_duration)"

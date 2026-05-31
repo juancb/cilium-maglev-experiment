@@ -5,10 +5,12 @@ set -euo pipefail
 cd "$(dirname "$0")"
 . lib/common.sh
 FAILED=0
+SECONDS=0
 
 N1="${PFX}-node1"
 
 info "Test 2a — kube-proxy replacement / native routing / BPF masquerade"
+step "fetching cilium status"
 ST=$(docker exec "$N1" k3s kubectl -n kube-system exec ds/cilium -- cilium status --verbose 2>/dev/null || true)
 grep -qi 'KubeProxyReplacement:\s*True' <<<"$ST" && ok "kube-proxy replacement = True" \
                                                  || bad "kube-proxy replacement not True"
@@ -18,11 +20,13 @@ grep -qi 'Masquerading:.*BPF' <<<"$ST" && ok "BPF masquerade" \
                                        || yellow "  INFO: confirm bpf.masquerade in 'cilium status'"
 
 info "Test 2b — service programmed + maglev config + identical seed across agents"
+step "checking VIP in cilium service list"
 docker exec "$N1" k3s kubectl -n kube-system exec ds/cilium -- cilium service list 2>/dev/null \
   | grep -q "$VIP" && ok "VIP ${VIP} present in service list" || bad "VIP not in cilium service list"
 
 seeds=""
 for n in "${NODES[@]}"; do
+  step "checking maglev config on $(basename "$n")"
   cfg=$(docker exec "$n" k3s kubectl -n kube-system exec ds/cilium -- cilium config view 2>/dev/null || true)
   alg=$(grep -iE 'node-port-algorithm|bpf-lb-algorithm' <<<"$cfg" | head -1 || true)
   seed=$(grep -i 'maglev' <<<"$cfg" | grep -i 'seed' | awk '{print $NF}' | head -1 || true)
@@ -34,14 +38,11 @@ uniq_seeds=$(tr ' ' '\n' <<<"$seeds" | sed '/^$/d' | sort -u | wc -l)
                         || bad "maglev hashSeed differs across agents (uniq=$uniq_seeds)"
 
 info "Test 2c — cross-node backend consistency (the Maglev property)"
-# With cgroupns=host Docker nodes, in-node TCP connections to the VIP may use a different
-# path (socket BPF) than client→VIP connections (tc BPF / XDP). We verify Maglev via the
-# BPF LB table which is the authoritative source — all nodes must have the SAME backend list.
 yellow "  Checking Maglev via BPF LB tables (not live probes — avoids socket BPF path issues)"
 first_backends=""
 maglev_consistent=1
 for n in "${NODES[@]}"; do
-  # Get backend list for the VIP from the BPF LB table
+  step "reading BPF LB table on $(basename "$n")"
   backends=$(docker exec "$n" bash -lc \
     "k3s kubectl -n kube-system exec ds/cilium -- cilium-dbg bpf lb list 2>/dev/null | \
      grep '${VIP}:${VIP_PORT}' | grep -v 'non-routable\|0\.0\.0\.0:0' | \
@@ -61,3 +62,4 @@ fi
 
 echo
 [ "$FAILED" -eq 0 ] && green "Test 2 PASSED" || { red "Test 2 had failures"; exit 1; }
+green "Runtime: $(fmt_duration)"

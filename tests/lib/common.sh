@@ -24,39 +24,75 @@ kc() { docker exec "${PFX}-node1" k3s kubectl "$@"; }
 # run a vtysh command on an FRR container
 frr() { local c="$1"; shift; docker exec "$c" vtysh -c "$*"; }
 
-# colourised pass/fail
+# colourised output
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 yellow(){ printf '\033[33m%s\033[0m\n' "$*"; }
-ok()   { green "  PASS: $*"; }
-bad()  { red   "  FAIL: $*"; FAILED=1; }
-info() { yellow "[*] $*"; }
+ok()    { green "  PASS: $*"; }
+bad()   { red   "  FAIL: $*"; FAILED=1; }
+info()  { yellow "[*] $*"; }
 
-# wait until all bird uplink + leaf BGP sessions to a node are Established
+# timestamped progress line (uses the caller's $SECONDS if set, else wall clock offset)
+step() { printf '\033[36m  [%3ds] %s\033[0m\n' "${SECONDS:-0}" "$*"; }
+
+fmt_duration() {
+  local s="${1:-${SECONDS:-0}}"
+  local m=$(( s / 60 )) r=$(( s % 60 ))
+  [ "$m" -gt 0 ] && printf '%dm %02ds' "$m" "$r" || printf '%ds' "$r"
+}
+
+# wait until all bird uplink BGP sessions on a node are Established
 wait_node_bgp() {
   local node="$1" tries="${2:-60}"
+  local elapsed=0
   for _ in $(seq 1 "$tries"); do
     if docker exec "$node" birdc show protocols 2>/dev/null | grep -qE 'uplink0.*Established' \
        && docker exec "$node" birdc show protocols 2>/dev/null | grep -qE 'uplink1.*Established'; then
       return 0
     fi
+    elapsed=$(( elapsed + 2 ))
+    [ $(( elapsed % 10 )) -eq 0 ] && step "waiting for bird uplinks on $(basename "$node")... (${elapsed}s)"
     sleep 2
   done
   return 1
 }
 
-# wait until the VIP is a multipath route at the leaf (leaf has per-node ECMP; drops when a
-# node fails, restores when it recovers — more reliable signal than spine-level ECMP)
+# wait until the VIP is a multipath route at the leaf (≥2 nexthops)
 wait_vip_ecmp() {
-  # arg = max seconds to wait (old arg was tries with 2s sleep; now 1s sleep so pass 2× old value)
   local max_secs="${1:-120}"
+  local elapsed=0
   for _ in $(seq 1 "$max_secs"); do
     local n
-    # FRR 9.1 format: "* 10.3.1.1, via eth4, weight 1" (nexthop before "via")
     n=$(frr "${LEAVES[0]}" "show ip route ${VIP}/32" 2>/dev/null | grep -cE '^\s+\* 10\.' || true)
     [ "${n:-0}" -ge 2 ] && return 0
+    elapsed=$(( elapsed + 1 ))
+    [ $(( elapsed % 5 )) -eq 0 ] && step "VIP ECMP: ${n:-0} nexthops at leaf1, need ≥2 (${elapsed}s)"
     sleep 1
   done
   return 1
 }
 
+# wait until all k8s nodes are Ready and all cilium-agent pods are 1/1 Running
+wait_cilium_ready() {
+  local tries="${1:-90}"
+  local max_secs=$(( tries * 3 ))
+  local N1="${PFX}-node1"
+  info "waiting for all nodes Ready + Cilium 1/1..."
+  local elapsed=0
+  for _ in $(seq 1 "$max_secs"); do
+    local nodes_not_ready cilium_not_ready
+    nodes_not_ready=$(docker exec "$N1" k3s kubectl get nodes --no-headers 2>/dev/null \
+      | grep -cv ' Ready ' || true)
+    cilium_not_ready=$(docker exec "$N1" k3s kubectl -n kube-system get pods \
+      -l app.kubernetes.io/name=cilium-agent --no-headers 2>/dev/null \
+      | grep -cv '1/1.*Running' || true)
+    [ "${nodes_not_ready:-1}" -eq 0 ] && [ "${cilium_not_ready:-1}" -eq 0 ] && return 0
+    elapsed=$(( elapsed + 1 ))
+    if [ $(( elapsed % 10 )) -eq 0 ]; then
+      step "still waiting: ${nodes_not_ready} node(s) not Ready, ${cilium_not_ready} cilium pod(s) not 1/1 (${elapsed}s)"
+    fi
+    sleep 1
+  done
+  yellow "  WARNING: cluster not fully ready after ${max_secs}s"
+  return 1
+}
