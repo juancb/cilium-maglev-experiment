@@ -72,7 +72,7 @@ def flow_stats(data: dict) -> dict:
     return stats
 
 
-def timeline_data(flows: list, failtime: float | None) -> tuple:
+def timeline_data(flows: list, failtime) -> tuple:
     """Return (times_rel, cumulative_broken, has_failtime) relative to failtime.
 
     Returns non-empty has_failtime even when 0 flows broke, so the caller can
@@ -198,7 +198,7 @@ def make_backend_dist_png(stats: dict, out_path: Path):
     width = 0.8 / max(len(all_backends), 1)
 
     fig, ax = plt.subplots(figsize=(max(10, len(cells) * 2), 5))
-    cmap = plt.cm.get_cmap("tab20", len(all_backends))
+    cmap = matplotlib.colormaps.get_cmap("tab20").resampled(len(all_backends))
 
     for i, backend in enumerate(all_backends):
         counts = [backend_counts[tag].get(backend, 0) for tag in cells]
@@ -253,7 +253,7 @@ def html_color(actual_pct: float, expected_pct: int) -> str:
     return "#e74c3c"       # red
 
 
-def build_html(stats: dict, timeline_png: Path | None, backend_png: Path | None) -> str:
+def build_html(stats: dict, timeline_png, backend_png) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     # Group tags by test type for display order
@@ -298,7 +298,7 @@ def build_html(stats: dict, timeline_png: Path | None, backend_png: Path | None)
           <td style="font-size:0.8em">{backends_str}</td>
         </tr>"""
 
-    def img_tag(path: Path | None) -> str:
+    def img_tag(path) -> str:
         if path and path.exists():
             rel = path.name
             return f'<img src="plots/{rel}" style="max-width:100%;margin:1em 0">'
@@ -379,7 +379,7 @@ def main():
         exp = EXPECTED.get(tag, "—")
         mark = ""
         if isinstance(exp, int):
-            mark = "✓" if abs(s["pct"] - exp) <= 5 else "✗"
+            mark = "OK" if abs(s["pct"] - exp) <= 5 else "!!"
         print(f"  {tag:<33} {s['established']:>6} {s['broken']:>8} {s['pct']:>6.1f}% {str(exp)+'%':>7} {mark}")
 
     print()
