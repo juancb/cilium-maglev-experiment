@@ -24,8 +24,10 @@ kind: CiliumBGPPeerConfig
 metadata:
   name: bird-peer
 spec:
-  # 127.0.0.1 ↔ 127.0.0.1 is on lo (directly connected); multihop kept small as a safety net.
-  ebgpMultihop: 2
+  # Use the k8s IP (10.10.0.X) instead of loopback: Cilium sets next-hop to its TCP source
+  # IP for the session. With 127.0.0.1, Cilium uses next-hop=0.0.0.0 which bird rejects
+  # before the import filter can fix it. With 10.10.0.X, Cilium uses a valid next-hop.
+  # ebgpMultihop not needed (directly connected via k8s dummy interface).
   timers:
     connectRetryTimeSeconds: 1
     holdTimeSeconds: 9
@@ -71,7 +73,7 @@ spec:
       peers:
         - name: "bird-local"
           peerASN: 65021
-          peerAddress: 127.0.0.1
+          peerAddress: 10.10.0.1
           peerConfigRef:
             name: bird-peer
 ---
@@ -89,7 +91,7 @@ spec:
       peers:
         - name: "bird-local"
           peerASN: 65022
-          peerAddress: 127.0.0.1
+          peerAddress: 10.10.0.2
           peerConfigRef:
             name: bird-peer
 ---
@@ -107,6 +109,6 @@ spec:
       peers:
         - name: "bird-local"
           peerASN: 65023
-          peerAddress: 127.0.0.1
+          peerAddress: 10.10.0.3
           peerConfigRef:
             name: bird-peer

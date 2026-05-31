@@ -60,9 +60,16 @@ if [ -f /sys/fs/cgroup/cgroup.subtree_control ]; then
 fi
 
 echo "[node${ID}] bpf + cgroup2 mounts for Cilium"
+# Make root rshared first so Cilium can bind-mount /sys/fs/bpf, /var/run/netns, etc.
+mount --make-rshared / 2>/dev/null || true
 mount bpffs -t bpf /sys/fs/bpf 2>/dev/null || true
-mkdir -p /run/cilium/cgroupv2
-mount -t cgroup2 none /run/cilium/cgroupv2 2>/dev/null || true
+mount --make-shared /sys/fs/bpf 2>/dev/null || true
+mkdir -p /var/run/netns /var/run/cilium /run/cilium/cgroupv2
+# With cgroupns=host, processes live in the HOST cgroup tree (/sys/fs/cgroup).
+# Bind /sys/fs/cgroup to /run/cilium/cgroupv2 so Cilium's socket BPF programs
+# attach to the real cgroup tree (not a disconnected mount).
+mount --bind /sys/fs/cgroup /run/cilium/cgroupv2 2>/dev/null || true
+mount --make-shared /run/cilium/cgroupv2 2>/dev/null || true
 
 echo "[node${ID}] starting host bird"
 mkdir -p /run/bird
