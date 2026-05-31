@@ -38,7 +38,8 @@ set_ch() {
 }
 
 run_cell() {
-  local ch="$1" mag="$2" tag="ch-${ch}_maglev-${mag}"
+  local ch="$1" mag="$2"
+  local tag="ch-${ch}_maglev-${mag}"
   info "=== cell: CH ${ch} / Maglev ${mag} ==="
   docker start "$FAIL_SPINE" >/dev/null 2>&1 || true
   wait_vip_ecmp 30 || yellow "  INFO: VIP ECMP not fully reconverged before run"
