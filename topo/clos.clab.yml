@@ -1,0 +1,102 @@
+# Cilium Maglev × switch consistent-hashing lab — containerlab topology.
+# Run from WSL2:  sudo containerlab deploy -t topo/clos.clab.yml
+#
+# Tiers (see docs/ADDRESSING.md):
+#   client ── tor(SONiC) ──3x── spine1/2/3(FRR) ──mesh── leaf1/2(FRR) ──── node1/2/3 (k3s+bird+cilium)
+#
+# Only the ToR needs SONiC's consistent-hashing dataplane (the 3-way ECMP group that a spine
+# failure shrinks). Spines/leaves are plain ECMP forwarders → FRR (lighter in WSL2).
+
+name: maglev-clos
+
+mgmt:
+  network: maglev-mgmt
+  ipv4-subnet: 172.30.0.0/24
+
+topology:
+  kinds:
+    linux:
+      # FRR switches and the client share the FRR image; nodes override below.
+      image: quay.io/frrouting/frr:9.1.0
+
+  nodes:
+    # ---- ToR: the consistent-hashing switch -------------------------------------------------
+    tor:
+      kind: sonic-vs
+      image: docker-sonic-vs:latest          # `docker load` the sonic-vs image first
+      binds:
+        - ../fabric/tor/config_db.json:/etc/sonic/config_db.json
+        - ../fabric/tor/ch-on.sh:/etc/sonic/ch-on.sh
+        - ../fabric/tor/ch-off.sh:/etc/sonic/ch-off.sh
+      # CH knob is applied at runtime via fabric/tor/ch-on.sh (default) — see Makefile.
+
+    # ---- Spines (FRR) -----------------------------------------------------------------------
+    spine1: { group: spine, binds: [ ../fabric/frr/spine1.conf:/etc/frr/frr.conf, ../fabric/frr/daemons:/etc/frr/daemons ] }
+    spine2: { group: spine, binds: [ ../fabric/frr/spine2.conf:/etc/frr/frr.conf, ../fabric/frr/daemons:/etc/frr/daemons ] }
+    spine3: { group: spine, binds: [ ../fabric/frr/spine3.conf:/etc/frr/frr.conf, ../fabric/frr/daemons:/etc/frr/daemons ] }
+
+    # ---- Leaves (FRR) -----------------------------------------------------------------------
+    leaf1: { group: leaf, binds: [ ../fabric/frr/leaf1.conf:/etc/frr/frr.conf, ../fabric/frr/daemons:/etc/frr/daemons ] }
+    leaf2: { group: leaf, binds: [ ../fabric/frr/leaf2.conf:/etc/frr/frr.conf, ../fabric/frr/daemons:/etc/frr/daemons ] }
+
+    # ---- Kubernetes nodes: k3s + host bird + Cilium -----------------------------------------
+    # Built by nodes/Dockerfile (k3s + bird2 + tooling baked in). Privileged for bpf/cgroup.
+    node1: &knode
+      kind: linux
+      image: maglev/k3s-bird:latest
+      group: knode
+      privileged: true
+      binds:
+        - ../nodes/bird/node1.conf:/etc/bird/bird.conf
+        - ../nodes/startup/node.sh:/opt/startup.sh
+        - ../k8s:/opt/k8s
+      env: { NODE_ID: "1" }
+      exec:
+        - bash -lc "bash /opt/startup.sh >/var/log/startup.log 2>&1 &"
+    node2:
+      <<: *knode
+      binds:
+        - ../nodes/bird/node2.conf:/etc/bird/bird.conf
+        - ../nodes/startup/node.sh:/opt/startup.sh
+        - ../k8s:/opt/k8s
+      env: { NODE_ID: "2" }
+    node3:
+      <<: *knode
+      binds:
+        - ../nodes/bird/node3.conf:/etc/bird/bird.conf
+        - ../nodes/startup/node.sh:/opt/startup.sh
+        - ../k8s:/opt/k8s
+      env: { NODE_ID: "3" }
+
+    # ---- External client (FRR for BGP + flowgen mounted in) ---------------------------------
+    client:
+      kind: linux
+      image: maglev/client:latest            # built by tests/lib/flowgen/Dockerfile (frr + flowgen)
+      binds:
+        - ../fabric/frr/client.conf:/etc/frr/frr.conf
+        - ../fabric/frr/daemons:/etc/frr/daemons
+        - ../nodes/startup/client.sh:/opt/startup.sh
+      exec:
+        - bash -lc "bash /opt/startup.sh >/var/log/startup.log 2>&1 &"
+
+  links:
+    # client ↔ tor
+    - endpoints: ["client:eth1", "tor:eth1"]            # tor Ethernet0
+    # tor ↔ spines
+    - endpoints: ["tor:eth2", "spine1:eth1"]            # tor Ethernet4
+    - endpoints: ["tor:eth3", "spine2:eth1"]            # tor Ethernet8
+    - endpoints: ["tor:eth4", "spine3:eth1"]            # tor Ethernet12
+    # spines ↔ leaves (full mesh)
+    - endpoints: ["spine1:eth2", "leaf1:eth1"]
+    - endpoints: ["spine1:eth3", "leaf2:eth1"]
+    - endpoints: ["spine2:eth2", "leaf1:eth2"]
+    - endpoints: ["spine2:eth3", "leaf2:eth2"]
+    - endpoints: ["spine3:eth2", "leaf1:eth3"]
+    - endpoints: ["spine3:eth3", "leaf2:eth3"]
+    # leaves ↔ nodes (each node dual-homed: fab0→leaf1, fab1→leaf2)
+    - endpoints: ["leaf1:eth4", "node1:fab0"]
+    - endpoints: ["leaf1:eth5", "node2:fab0"]
+    - endpoints: ["leaf1:eth6", "node3:fab0"]
+    - endpoints: ["leaf2:eth4", "node1:fab1"]
+    - endpoints: ["leaf2:eth5", "node2:fab1"]
+    - endpoints: ["leaf2:eth6", "node3:fab1"]

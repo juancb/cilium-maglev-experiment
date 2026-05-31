@@ -1,0 +1,112 @@
+# Cilium BGP control plane (v2) — each node's Cilium peers ITS OWN host bird at 127.0.0.1.
+#
+# Per-node ASNs (Cilium 6503x ↔ bird 6502x) require one CiliumBGPClusterConfig per node,
+# selected by hostname. They share one PeerConfig (timers/families) and one Advertisement
+# (Service VIP + PodCIDR). bird re-advertises these out fab0/fab1 to the leaves.
+#
+# Nodes MUST keep distinct ASNs (65021/22/23): a shared node ASN would make BGP loop-prevention
+# drop cross-node pod-CIDR routes, breaking native pod-to-pod routing through the fabric.
+#
+# FALLBACK (if the local-bird session won't establish): delete the three ClusterConfigs below
+# and instead peer the leaves directly — one ClusterConfig with two peers (10.3.1.0 leaf1 via
+# fab0, 10.3.2.0 leaf2 via fab1), peerASN 65011/65012. bird is then not in the data path.
+---
+apiVersion: cilium.io/v2alpha1
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: vip-pool
+spec:
+  blocks:
+    - cidr: 192.0.2.0/24      # Service VIP 192.0.2.10 is allocated from here
+---
+apiVersion: cilium.io/v2alpha1
+kind: CiliumBGPPeerConfig
+metadata:
+  name: bird-peer
+spec:
+  # 127.0.0.1 ↔ 127.0.0.1 is on lo (directly connected); multihop kept small as a safety net.
+  ebgpMultihop: 2
+  timers:
+    connectRetryTimeSeconds: 1
+    holdTimeSeconds: 9
+    keepAliveTimeSeconds: 3
+  gracefulRestart:
+    enabled: true
+    restartTimeSeconds: 30
+  families:
+    - afi: ipv4
+      safi: unicast
+      advertisements:
+        matchLabels:
+          advertise: bgp
+---
+apiVersion: cilium.io/v2alpha1
+kind: CiliumBGPAdvertisement
+metadata:
+  name: vip-and-pods
+  labels:
+    advertise: bgp
+spec:
+  advertisements:
+    - advertisementType: Service
+      service:
+        addresses:
+          - LoadBalancerIP
+      selector:
+        matchLabels:
+          app: echo
+    - advertisementType: PodCIDR
+---
+apiVersion: cilium.io/v2alpha1
+kind: CiliumBGPClusterConfig
+metadata:
+  name: node1-bgp
+spec:
+  nodeSelector:
+    matchLabels:
+      kubernetes.io/hostname: node1
+  bgpInstances:
+    - name: "cilium-65031"
+      localASN: 65031
+      peers:
+        - name: "bird-local"
+          peerASN: 65021
+          peerAddress: 127.0.0.1
+          peerConfigRef:
+            name: bird-peer
+---
+apiVersion: cilium.io/v2alpha1
+kind: CiliumBGPClusterConfig
+metadata:
+  name: node2-bgp
+spec:
+  nodeSelector:
+    matchLabels:
+      kubernetes.io/hostname: node2
+  bgpInstances:
+    - name: "cilium-65032"
+      localASN: 65032
+      peers:
+        - name: "bird-local"
+          peerASN: 65022
+          peerAddress: 127.0.0.1
+          peerConfigRef:
+            name: bird-peer
+---
+apiVersion: cilium.io/v2alpha1
+kind: CiliumBGPClusterConfig
+metadata:
+  name: node3-bgp
+spec:
+  nodeSelector:
+    matchLabels:
+      kubernetes.io/hostname: node3
+  bgpInstances:
+    - name: "cilium-65033"
+      localASN: 65033
+      peers:
+        - name: "bird-local"
+          peerASN: 65023
+          peerAddress: 127.0.0.1
+          peerConfigRef:
+            name: bird-peer

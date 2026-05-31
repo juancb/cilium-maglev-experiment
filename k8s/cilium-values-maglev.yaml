@@ -1,0 +1,45 @@
+# Cilium Helm values — MAGLEV variant.
+# kube-proxy replacement + native routing + BPF masquerade + BGP control plane,
+# with consistent-hashing (Maglev) backend selection.
+#
+# Install:  helm install cilium cilium/cilium -n kube-system -f k8s/cilium-values-maglev.yaml
+# (the no-maglev variant differs only in loadBalancer.algorithm — see cilium-values-nomaglev.yaml)
+
+kubeProxyReplacement: true
+# node1's apiserver, routable across the fabric once bird has converged (before agents join).
+k8sServiceHost: 10.10.0.1
+k8sServicePort: 6443
+
+routingMode: native
+ipv4NativeRoutingCIDR: 10.244.0.0/16
+autoDirectNodeRoutes: false        # cross-node pod routes come via BGP through the fabric
+endpointRoutes:
+  enabled: true
+
+bpf:
+  masquerade: true
+
+ipam:
+  mode: cluster-pool
+  operator:
+    clusterPoolIPv4PodCIDRList:
+      - 10.244.0.0/16
+    clusterPoolIPv4MaskSize: 24
+
+# ---- the knob under test -----------------------------------------------------------------
+loadBalancer:
+  algorithm: maglev                # consistent hashing for backend selection
+  mode: snat
+maglev:
+  tableSize: 16381
+  # MUST be identical on every agent for cross-node backend consistency.
+  hashSeed: "JLfvgnHc2kaSUFaI"
+# ------------------------------------------------------------------------------------------
+
+bgpControlPlane:
+  enabled: true
+
+operator:
+  replicas: 1
+hubble:
+  enabled: false
