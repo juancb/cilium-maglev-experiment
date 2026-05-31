@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
-# Test 3 — the headline 2×2. Open N long-lived flows, fail spine1, count resets in each of
-# {ToR CH on/off} × {Maglev on/off}. Expected (P=3, M=3, large B):
-#   CH off / Maglev off ≈ 44%   |   CH on / Maglev off ≈ 22%   |   Maglev on (either) ≈ 0%
+# Test 3 — the headline 2×2.
+# Open N long-lived TCP flows, fail node2 (no pods; all pods on node3), count RSTs.
+#
+# Why node2, not spine1: in a CLOS fabric with per-flow ECMP at each tier, the same
+# 5-tuple always maps to the same leaf→node regardless of which spine carries it.
+# A spine failure only changes the spine, not the ingress node, so Maglev vs random
+# makes no difference. A NODE failure forces flow re-homing to a different ingress
+# Cilium agent, which is exactly what the Maglev vs random comparison tests.
+#
+# Expected (M=3 nodes, B=6 backends, ~1/3 of flows on node2):
+#   Maglev off: re-homed flows pick random backend → ~(1/3)×((B-1)/B)≈~28% break
+#   Maglev on:  re-homed flows pick SAME backend   → ~0% break
 #
 # Env knobs:  N=<flows> (default 300)   B=<backends> (default 6)   DUR=<sec> (default 50)
 set -euo pipefail
@@ -41,7 +50,11 @@ run_cell() {
   local ch="$1" mag="$2"
   local tag="ch-${ch}_maglev-${mag}"
   info "=== cell: CH ${ch} / Maglev ${mag} ==="
+  # Restart the failed node and bring its network/bird back up.
+  # docker start restarts the container, but startup.sh must be re-run to restore
+  # interfaces and bird (they're not part of the container's entrypoint/CMD).
   docker start "$FAIL_SPINE" >/dev/null 2>&1 || true
+  docker exec -d "$FAIL_SPINE" bash /opt/startup.sh 2>/dev/null || true
   wait_vip_ecmp 30 || yellow "  INFO: VIP ECMP not fully reconverged before run"
   set_ch "$ch"
 

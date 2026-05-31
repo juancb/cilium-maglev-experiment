@@ -45,18 +45,23 @@ wait_node_bgp() {
   return 1
 }
 
-# wait until the VIP is a multipath route somewhere in the fabric (ToR sees 3 nexthops)
+# wait until the VIP is a multipath route at the leaf (leaf has per-node ECMP; drops when a
+# node fails, restores when it recovers — more reliable signal than spine-level ECMP)
 wait_vip_ecmp() {
   local tries="${1:-60}"
   for _ in $(seq 1 "$tries"); do
     local n
-    # FRR 9.1 format: "* 10.2.0.1, via eth2, weight 1" (nexthop IP before "via")
-    n=$(frr "${SPINES[0]}" "show ip route ${VIP}/32" 2>/dev/null | grep -cE '^\s+\* 10\.' || true)
+    # FRR 9.1 format: "* 10.3.1.1, via eth4, weight 1" (nexthop before "via")
+    n=$(frr "${LEAVES[0]}" "show ip route ${VIP}/32" 2>/dev/null | grep -cE '^\s+\* 10\.' || true)
     [ "${n:-0}" -ge 2 ] && return 0
     sleep 2
   done
   return 1
 }
 
-# the spine we fail in Test 3
-FAIL_SPINE="${PFX}-spine1"
+# We fail a NODE (not a spine) because spine failures don't change the ingress node in
+# a CLOS fabric — per-flow ECMP is deterministic at each tier so same 5-tuple → same leaf
+# → same node regardless of spine. A node failure forces flow re-homing to a different
+# ingress node, which is what exercises Maglev backend consistency.
+# node2 has no echo pods (all pods are on node3), so it can be stopped safely.
+FAIL_SPINE="${PFX}-node2"
