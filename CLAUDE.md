@@ -1,10 +1,3 @@
-<!-- >>> ACTIVE HANDOFF >>> -->
-> **START HERE:** There is an in-progress live bring-up of this lab. **Read `HANDOFF.md` in the
-> repo root before doing anything**, then continue from its "NEXT STEPS".
-> Once you've absorbed the context and the deploy is underway, **delete `HANDOFF.md` and remove
-> this pointer block** (everything between the `>>> ACTIVE HANDOFF >>>` markers).
-<!-- <<< ACTIVE HANDOFF <<< -->
-
 # cilium-maglev-experiment
 
 Virtual leaf-spine lab measuring the impact of Cilium **Maglev** consistent hashing and switch
