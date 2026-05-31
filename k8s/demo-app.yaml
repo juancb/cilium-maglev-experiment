@@ -46,7 +46,18 @@ spec:
     metadata:
       labels: { app: echo }
     spec:
-      # spread backends across all three nodes for a clean Maglev demonstration
+      # Backends must NOT run on node2 (the node we fail in Test 3).
+      # If backends were on node2, they'd die with the node, making all
+      # node2-ingressed flows fail regardless of Maglev/random.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values:
+                      - node2
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
