@@ -50,7 +50,8 @@ wait_vip_ecmp() {
   local tries="${1:-60}"
   for _ in $(seq 1 "$tries"); do
     local n
-    n=$(frr "${SPINES[0]}" "show ip route ${VIP}/32" 2>/dev/null | grep -cE 'via 10\.2\.' || true)
+    # FRR 9.1 format: "* 10.2.0.1, via eth2, weight 1" (nexthop IP before "via")
+    n=$(frr "${SPINES[0]}" "show ip route ${VIP}/32" 2>/dev/null | grep -cE '^\s+\* 10\.' || true)
     [ "${n:-0}" -ge 2 ] && return 0
     sleep 2
   done
