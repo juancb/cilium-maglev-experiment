@@ -26,11 +26,11 @@ images:
 up:
 	@command -v containerlab >/dev/null || { echo "install containerlab first"; exit 1; }
 	@docker image inspect maglev/k3s-bird:latest >/dev/null 2>&1 || $(MAKE) images
-	$(CLAB) deploy -t $(TOPO) --reconfigure
-	bash scripts/cluster-up.sh
+	bash scripts/bring-up.sh
 
 down:
-	$(CLAB) destroy -t $(TOPO) --cleanup || true
+	$(CLAB) destroy -t $(TOPO) 2>/dev/null || true
+	docker rm -f clab-maglev-clos-node1 clab-maglev-clos-node2 clab-maglev-clos-node3 2>/dev/null || true
 
 redeploy: down up
 
