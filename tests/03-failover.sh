@@ -46,16 +46,26 @@ set_ch() {
     || yellow "  INFO: ToR CH toggle failed (sonic-vs fidelity?) — set EMULATE_CH=1 to script it"
 }
 
+restore_fail_node() {
+  # docker start is a no-op if already running; actual start clears the netns
+  # destroying both fab0/fab1 in the node AND the peer eth in the leaf.
+  # We detect this by checking if fab0 is absent after the start.
+  docker start "$FAIL_SPINE" >/dev/null 2>&1 || true
+  sleep 0.5  # let the container process initialise
+  if ! docker exec "$FAIL_SPINE" ip link show fab0 >/dev/null 2>&1; then
+    # Fresh netns: recreate veth pairs from scratch, then reconfigure network
+    local node="${FAIL_SPINE#${PFX}-}"
+    bash "${REPO_ROOT}/scripts/rewire-node-veths.sh" "$node" 2>/dev/null || true
+    docker exec -d "$FAIL_SPINE" bash /opt/startup.sh 2>/dev/null || true
+  fi
+}
+
 run_cell() {
   local ch="$1" mag="$2"
   local tag="ch-${ch}_maglev-${mag}"
   info "=== cell: CH ${ch} / Maglev ${mag} ==="
-  # Restart the failed node and bring its network/bird back up.
-  # docker start recreates the container netns, losing manually-placed veths;
-  # fix-node-veths.sh moves them back before startup.sh re-addresses them.
-  docker start "$FAIL_SPINE" >/dev/null 2>&1 || true
-  bash "${REPO_ROOT}/scripts/fix-node-veths.sh" "$FAIL_SPINE" 2>/dev/null || true
-  docker exec -d "$FAIL_SPINE" bash /opt/startup.sh 2>/dev/null || true
+  # Restore the failed node (idempotent: if already up and wired, this is a no-op).
+  restore_fail_node
   wait_vip_ecmp 30 || yellow "  INFO: VIP ECMP not fully reconverged before run"
   set_ch "$ch"
 
@@ -74,8 +84,7 @@ run_cell() {
   info "stopping ${FAIL_SPINE}"
   docker stop "$FAIL_SPINE" >/dev/null
   sleep $((DUR > 20 ? DUR-15 : 10))     # let resets surface, leave margin before flowgen ends
-  docker start "$FAIL_SPINE" >/dev/null
-  bash "${REPO_ROOT}/scripts/fix-node-veths.sh" "$FAIL_SPINE" 2>/dev/null || true
+  restore_fail_node
 
   # collect
   for _ in $(seq 1 30); do

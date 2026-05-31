@@ -1,0 +1,131 @@
+name: maglev-clos
+
+nodes:
+  client:
+    kind: linux
+    image: ubuntu:24.04
+    containeridm: true
+    exec:
+      - ip link set dev eth0 down
+      - ip link set dev eth0 up
+
+  tor:
+    kind: linux
+    image: ubuntu:24.04
+    containeridm: true
+    exec:
+      - ip link set dev eth0 down
+      - ip link set dev eth0 up
+
+  spine1:
+    kind: linux
+    image: ubuntu:24.04
+    containeridm: true
+    exec:
+      - ip link set dev eth0 down
+      - ip link set dev eth0 up
+      - ip link set dev eth1 down
+      - ip link set dev eth1 up
+      - ip link set dev eth2 down
+      - ip link set dev eth2 up
+
+  spine2:
+    kind: linux
+    image: ubuntu:24.04
+    containeridm: true
+    exec:
+      - ip link set dev eth0 down
+      - ip link set dev eth0 up
+      - ip link set dev eth1 down
+      - ip link set dev eth1 up
+      - ip link set dev eth2 down
+      - ip link set dev eth2 up
+
+  spine3:
+    kind: linux
+    image: ubuntu:24.04
+    containeridm: true
+    exec:
+      - ip link set dev eth0 down
+      - ip link set dev eth0 up
+      - ip link set dev eth1 down
+      - ip link set dev eth1 up
+      - ip link set dev eth2 down
+      - ip link set dev eth2 up
+
+  leaf1:
+    kind: linux
+    image: ubuntu:24.04
+    containeridm: true
+    exec:
+      - ip link set dev eth0 down
+      - ip link set dev eth0 up
+      - ip link set dev eth1 down
+      - ip link set dev eth1 up
+      - ip link set dev eth2 down
+      - ip link set dev eth2 up
+
+  leaf2:
+    kind: linux
+    image: ubuntu:24.04
+    containeridm: true
+    exec:
+      - ip link set dev eth0 down
+      - ip link set dev eth0 up
+      - ip link set dev eth1 down
+      - ip link set dev eth1 up
+      - ip link set dev eth2 down
+      - ip link set dev eth2 up
+
+  node1:
+    kind: linux
+    image: ubuntu:24.04
+    containeridm: true
+    exec:
+      - ip link set dev fab0 down
+      - ip link set dev fab0 up
+      - ip link set dev fab1 down
+      - ip link set dev fab1 up
+
+  node2:
+    kind: linux
+    image: ubuntu:24.04
+    containeridm: true
+    exec:
+      - ip link set dev fab0 down
+      - ip link set dev fab0 up
+      - ip link set dev fab1 down
+      - ip link set dev fab1 up
+
+  node3:
+    kind: linux
+    image: ubuntu:24.04
+    containeridm: true
+    exec:
+      - ip link set dev fab0 down
+      - ip link set dev fab0 up
+      - ip link set dev fab1 down
+      - ip link set dev fab1 up
+
+links:
+  # client to tor
+  - endpoints: ["client:eth0", "tor:eth0"]
+  # tor to spines (3 links)
+  - endpoints: ["tor:eth1", "spine1:eth0"]
+  - endpoints: ["tor:eth2", "spine2:eth0"]
+  - endpoints: ["tor:eth3", "spine3:eth0"]
+  # spines to leaves (full mesh, 6 links)
+  - endpoints: ["spine1:eth1", "leaf1:eth0"]
+  - endpoints: ["spine2:eth1", "leaf2:eth0"]
+  - endpoints: ["spine3:eth1", "leaf1:eth1"]
+  - endpoints: ["spine1:eth2", "leaf1:eth2"]
+  - endpoints: ["spine2:eth2", "leaf2:eth1"]
+  - endpoints: ["spine3:eth2", "leaf2:eth2"]
+  # leaves to nodes (6 links, leaf1→nodeX fab0)
+  - endpoints: ["leaf1:eth3", "node1:fab0"]
+  - endpoints: ["leaf1:eth4", "node2:fab0"]
+  - endpoints: ["leaf1:eth5", "node3:fab0"]
+  # leaves to nodes (6 links, leaf2→nodeX fab1)
+  - endpoints: ["leaf2:eth3", "node1:fab1"]
+  - endpoints: ["leaf2:eth4", "node2:fab1"]
+  - endpoints: ["leaf2:eth5", "node3:fab1"]
