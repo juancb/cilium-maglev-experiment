@@ -1,0 +1,7 @@
+# Force LF for everything that runs in Linux containers or on network devices.
+* text=auto eol=lf
+
+# Binary files — no conversion.
+*.gz binary
+*.bin binary
+*.pyc binary
