@@ -60,9 +60,3 @@ wait_vip_ecmp() {
   return 1
 }
 
-# We fail a NODE (not a spine) because spine failures don't change the ingress node in
-# a CLOS fabric — per-flow ECMP is deterministic at each tier so same 5-tuple → same leaf
-# → same node regardless of spine. A node failure forces flow re-homing to a different
-# ingress node, which is what exercises Maglev backend consistency.
-# node2 has no echo pods (all pods are on node3), so it can be stopped safely.
-FAIL_SPINE="${PFX}-node2"

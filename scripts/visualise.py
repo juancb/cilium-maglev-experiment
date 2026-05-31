@@ -93,14 +93,23 @@ def make_timeline_png(stats: dict, out_path: Path):
     fig, ax = plt.subplots(figsize=(10, 6))
 
     colors = {
+        "spine-failure_ch-off_maglev-off": "#95a5a6",
+        "spine-failure_ch-on_maglev-off":  "#7f8c8d",
+        "spine-failure_ch-off_maglev-on":  "#bdc3c7",
+        "spine-failure_ch-on_maglev-on":   "#ecf0f1",
+        "single-node_ch-off_maglev-off":   "#e74c3c",
+        "single-node_ch-on_maglev-off":    "#e67e22",
+        "single-node_ch-off_maglev-on":    "#2ecc71",
+        "single-node_ch-on_maglev-on":     "#27ae60",
+        "dsr_maglev-off":                  "#9b59b6",
+        "dsr_maglev-on":                   "#1abc9c",
+        "etp-local_maglev-off":            "#c0392b",
+        "etp-local_maglev-on":             "#e74c3c",
+        # legacy names (pre-rename)
         "ch-off_maglev-off":  "#e74c3c",
         "ch-on_maglev-off":   "#e67e22",
         "ch-off_maglev-on":   "#2ecc71",
         "ch-on_maglev-on":    "#27ae60",
-        "dsr_maglev-off":     "#9b59b6",
-        "dsr_maglev-on":      "#1abc9c",
-        "etp-local_maglev-off": "#c0392b",
-        "etp-local_maglev-on":  "#e74c3c",
     }
 
     plotted = False
@@ -181,14 +190,27 @@ def make_backend_dist_png(stats: dict, out_path: Path):
 
 
 EXPECTED = {
-    "ch-off_maglev-off":    44,
-    "ch-on_maglev-off":     22,
-    "ch-off_maglev-on":      0,
-    "ch-on_maglev-on":       0,
+    # Spine failure: ToR ECMP 3→2; same leaf→node path → no ingress-node change → Maglev irrelevant
+    "spine-failure_ch-off_maglev-off":  0,
+    "spine-failure_ch-on_maglev-off":   0,
+    "spine-failure_ch-off_maglev-on":   0,
+    "spine-failure_ch-on_maglev-on":    0,
+    # Single-node failure: node removed from VIP ECMP; ~1/3 flows re-homed to new ingress agent
+    "single-node_ch-off_maglev-off":   28,   # re-homed flows pick random backend
+    "single-node_ch-on_maglev-off":    28,   # CH at spine doesn't affect leaf-level node selection
+    "single-node_ch-off_maglev-on":     0,   # Maglev picks same backend on new agent
+    "single-node_ch-on_maglev-on":      0,
+    # DSR: client IP preserved; Maglev must match on the new ingress node
     "dsr_maglev-off":       28,
     "dsr_maglev-on":         0,
+    # ETP=Local: pod must be local to the ingress node; re-homed flows always lose local pod
     "etp-local_maglev-off": 33,
     "etp-local_maglev-on":  33,
+    # Legacy (pre-rename)
+    "ch-off_maglev-off":   28,
+    "ch-on_maglev-off":    28,
+    "ch-off_maglev-on":     0,
+    "ch-on_maglev-on":      0,
 }
 
 
@@ -204,8 +226,31 @@ def html_color(actual_pct: float, expected_pct: int) -> str:
 def build_html(stats: dict, timeline_png: Path | None, backend_png: Path | None) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
+    # Group tags by test type for display order
+    GROUP_ORDER = ["spine-failure", "single-node", "dsr", "etp-local"]
+    GROUP_LABELS = {
+        "spine-failure": "Spine failure (baseline — expects ~0% both cells)",
+        "single-node":   "Single-node failure (primary Maglev experiment)",
+        "dsr":           "DSR mode",
+        "etp-local":     "ExternalTrafficPolicy=Local",
+    }
+
+    def tag_group(tag: str) -> str:
+        for g in GROUP_ORDER:
+            if tag.startswith(g):
+                return g
+        return "other"
+
+    sorted_tags = sorted(stats.keys(), key=lambda t: (GROUP_ORDER.index(tag_group(t)) if tag_group(t) in GROUP_ORDER else 99, t))
+
     rows = ""
-    for tag in sorted(stats.keys()):
+    last_group = None
+    for tag in sorted_tags:
+        g = tag_group(tag)
+        if g != last_group:
+            label = GROUP_LABELS.get(g, g)
+            rows += f'<tr><td colspan="6" style="background:#f7f7f7;padding:8px 10px;font-weight:bold;border-top:2px solid #ccc">{label}</td></tr>'
+            last_group = g
         s = stats[tag]
         pct = s["pct"]
         exp = EXPECTED.get(tag, "—")
@@ -219,7 +264,7 @@ def build_html(stats: dict, timeline_png: Path | None, backend_png: Path | None)
           <td align="right">{s['established']}</td>
           <td align="right" style="color:{color};font-weight:bold">{s['broken']}</td>
           <td align="right" style="color:{color};font-weight:bold">{pct:.1f}%</td>
-          <td align="right">{exp}%</td>
+          <td align="right">{exp if exp == '—' else str(exp)+'%'}</td>
           <td style="font-size:0.8em">{backends_str}</td>
         </tr>"""
 
@@ -262,12 +307,17 @@ def build_html(stats: dict, timeline_png: Path | None, backend_png: Path | None)
 
 <h2>Theory vs prediction (M=3 nodes, B=6 backends, P=3 spines)</h2>
 <pre>
-  CH off / Maglev off  →  D≈2N/3 → ~44% break
-  CH on  / Maglev off  →  D≈N/3  → ~22% break
-  Maglev on (any CH)   →  ~0%    (same backend selected; pod has state)
-  DSR + Maglev off     →  ~28%   (client IP preserved; random picks wrong pod)
-  DSR + Maglev on      →  ~0%    (client IP preserved; Maglev picks same pod)
-  ETP=Local (any)      →  ~33%   (re-homed flows always get different local pod)
+  Spine failure (default test)
+    Maglev off / on     →  ~0%   (spine failure doesn't change leaf→node ECMP group;
+                                   flows survive; Maglev has no effect to show here)
+
+  Single-node failure (--node-failure; primary Maglev experiment)
+    CH off / Maglev off →  ~28%  (~1/3 flows re-homed; random backend pick)
+    CH off / Maglev on  →  ~0%   (re-homed flows pick same backend via Maglev)
+
+  DSR + Maglev off      →  ~28%  (client IP preserved; random picks wrong pod)
+  DSR + Maglev on       →  ~0%   (client IP preserved; Maglev picks same pod)
+  ETP=Local (any)       →  ~33%  (re-homed flows always get different local pod)
 </pre>
 
 <h2>Flow breakage timeline</h2>
