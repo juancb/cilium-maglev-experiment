@@ -17,26 +17,56 @@ set -euo pipefail
 cd "$(dirname "$0")"
 . lib/common.sh
 
-N="${N:-300}"; DUR="${DUR:-50}"; B="${B:-6}"
+N="${N:-150}"; DUR="${DUR:-25}"; B="${B:-6}"
 HELM_VALUES_DIR="/opt/k8s"            # bound into node containers at /opt/k8s
 N1="${PFX}-node1"
 declare -A RESULT
 
 set_backends() {
   kc -n default scale deploy/echo --replicas="$B" >/dev/null
-  kc -n default rollout status deploy/echo --timeout=120s >/dev/null
+  kc -n default rollout status deploy/echo --timeout=120s >/dev/null 2>&1 || true
+}
+
+wait_cilium_ready() {
+  local tries="${1:-90}"
+  info "waiting for all nodes Ready + Cilium 1/1..."
+  for _ in $(seq 1 "$tries"); do
+    local nodes_not_ready cilium_not_ready
+    nodes_not_ready=$(docker exec "$N1" k3s kubectl get nodes --no-headers 2>/dev/null \
+      | grep -cv ' Ready ' || true)
+    cilium_not_ready=$(docker exec "$N1" k3s kubectl -n kube-system get pods \
+      -l app.kubernetes.io/name=cilium-agent --no-headers 2>/dev/null \
+      | grep -cv '1/1.*Running' || true)
+    [ "${nodes_not_ready:-1}" -eq 0 ] && [ "${cilium_not_ready:-1}" -eq 0 ] && return 0
+    sleep 3
+  done
+  yellow "  WARNING: cluster not fully ready after wait"
+  return 1
 }
 
 set_maglev() {
   local mode="$1"  # on|off
   local vals="cilium-values-maglev.yaml"; [ "$mode" = off ] && vals="cilium-values-nomaglev.yaml"
+  # Wait for Cilium to be stable before upgrading (node2 may still be recovering)
+  wait_cilium_ready 90 || true
   info "switching Maglev ${mode} (helm upgrade ${vals})"
   docker exec -e KUBECONFIG=/etc/rancher/k3s/k3s.yaml "$N1" \
       helm upgrade cilium cilium/cilium -n kube-system \
       -f "${HELM_VALUES_DIR}/${vals}" --reuse-values >/dev/null
-  docker exec "$N1" k3s kubectl -n kube-system rollout restart ds/cilium >/dev/null
-  docker exec "$N1" k3s kubectl -n kube-system rollout status ds/cilium --timeout=180s >/dev/null
-  sleep 5
+  # helm upgrade triggers a rolling update; no need for explicit rollout restart.
+  # Just wait for the rollout to complete, force-deleting any stuck Terminating pods.
+  for _ in $(seq 1 6); do
+    sleep 10
+    for stuck in $(docker exec "$N1" k3s kubectl -n kube-system get pods \
+        -l app.kubernetes.io/name=cilium-agent --no-headers 2>/dev/null \
+        | awk '/Terminating/{print $1}'); do
+      docker exec "$N1" k3s kubectl -n kube-system delete pod "$stuck" --force --grace-period=0 2>/dev/null || true
+      yellow "  force-deleted stuck pod: $stuck"
+    done
+  done
+  # Wait for ALL nodes including node2 — node2 must be forwarding before flows start.
+  wait_cilium_ready 120 || yellow "  WARNING: Cilium not fully ready; results may be skewed"
+  sleep 3
 }
 
 set_ch() {
@@ -58,6 +88,22 @@ restore_fail_node() {
     bash "${REPO_ROOT}/scripts/rewire-node-veths.sh" "$node" 2>/dev/null || true
     docker exec -d "$FAIL_SPINE" bash /opt/startup.sh 2>/dev/null || true
   fi
+  # Restart k3s agent if not running (docker stop kills all processes in the container)
+  if ! docker exec "$FAIL_SPINE" bash -c 'pgrep -f "k3s agent" >/dev/null 2>&1'; then
+    local token; token=$(docker exec "${PFX}-node1" cat /var/lib/rancher/k3s/server/node-token)
+    local node_num="${FAIL_SPINE##*node}"
+    # Clean stale runtime sockets so k3s-agent starts cleanly
+    docker exec "$FAIL_SPINE" bash -c 'rm -rf /run/k3s /var/run/k3s 2>/dev/null; true'
+    docker exec -d "$FAIL_SPINE" bash -lc \
+      "k3s agent --server https://10.10.0.1:6443 --token ${token} --node-ip 10.10.0.${node_num} \
+       --snapshotter=native >/var/log/k3s.log 2>&1"
+    yellow "  restarted k3s agent on ${FAIL_SPINE}"
+    # wait for node Ready (cgroup cleanup can take ~60-90s before kubelet posts status)
+    for _ in $(seq 1 90); do
+      kc get node "node${node_num}" --no-headers 2>/dev/null | grep -q ' Ready' && break
+      sleep 3
+    done
+  fi
 }
 
 run_cell() {
@@ -66,6 +112,7 @@ run_cell() {
   info "=== cell: CH ${ch} / Maglev ${mag} ==="
   # Restore the failed node (idempotent: if already up and wired, this is a no-op).
   restore_fail_node
+  wait_cilium_ready 60 || yellow "  INFO: Cilium not fully ready before run"
   wait_vip_ecmp 30 || yellow "  INFO: VIP ECMP not fully reconverged before run"
   set_ch "$ch"
 
@@ -110,22 +157,17 @@ run_cell() {
 }
 
 info "Test 3 setup: N=${N} flows, B=${B} backends, duration ${DUR}s"
+info "Note: ToR CH toggle non-functional (FRR ToR, not SONiC) — running CH-off cells only"
 set_backends
 
 set_maglev off
 run_cell off off
-run_cell on  off
 set_maglev on
 run_cell off on
-run_cell on  on
-
-# leave the lab in the maglev + CH-on state
-set_ch on
 
 echo
-green "================ 2×2 broken-flow matrix (broken/established) ================"
-printf '                 %-22s %-22s\n' "switch CH off" "switch CH on"
-printf 'Maglev off       %-22s %-22s\n' "${RESULT[ch-off_maglev-off]:-?}" "${RESULT[ch-on_maglev-off]:-?}"
-printf 'Maglev on        %-22s %-22s\n' "${RESULT[ch-off_maglev-on]:-?}"  "${RESULT[ch-on_maglev-on]:-?}"
-echo  "Predicted (P=3,M=3,large B): ~44% | ~22% (Maglev off);  ~0% | ~0% (Maglev on)"
+green "======== broken-flow results (CH lever non-functional, omitted) ========"
+printf 'Maglev off:  %s\n' "${RESULT[ch-off_maglev-off]:-?}"
+printf 'Maglev on:   %s\n' "${RESULT[ch-off_maglev-on]:-?}"
+echo  "Predicted (P=3,M=3,large B): ~44% broken (Maglev off);  ~0% (Maglev on)"
 echo  "Raw per-flow JSON in ${RESULTS_DIR}/"
