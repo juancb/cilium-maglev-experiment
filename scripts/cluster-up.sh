@@ -10,7 +10,10 @@ helm1() { docker exec -e KUBECONFIG="$KCFG" "${PFX}-node1" helm "$@"; }
 K3S_SERVER_FLAGS="--flannel-backend=none --disable-network-policy --disable-kube-proxy \
   --disable=traefik --disable=servicelb --disable=local-storage \
   --cluster-cidr 10.244.0.0/16 --service-cidr 10.96.0.0/16 \
-  --node-ip 10.10.0.1 --advertise-address 10.10.0.1 --tls-san 10.10.0.1"
+  --node-ip 10.10.0.1 --advertise-address 10.10.0.1 --tls-san 10.10.0.1 \
+  --snapshotter=native"
+# --snapshotter=native: overlay-on-overlay fails inside Docker containers (the containerd
+# data dir sits on Docker's overlayfs layer). "native" uses bind mounts instead.
 
 info "waiting for bird uplinks on all nodes (fabric must route k8s IPs before join)"
 for n in "${NODES[@]}"; do
@@ -30,7 +33,7 @@ for id in 2 3; do
   info "starting k3s agent on node${id}"
   docker exec -d "${PFX}-node${id}" bash -lc \
     "k3s agent --server https://10.10.0.1:6443 --token ${TOKEN} --node-ip 10.10.0.${id} \
-     >/var/log/k3s.log 2>&1"
+     --snapshotter=native >/var/log/k3s.log 2>&1"
 done
 
 info "waiting for 3 nodes to register"
