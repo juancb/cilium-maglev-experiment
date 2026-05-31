@@ -73,16 +73,20 @@ def flow_stats(data: dict) -> dict:
 
 
 def timeline_data(flows: list, failtime: float | None) -> tuple:
-    """Return (times_rel, cumulative_broken) relative to failtime."""
+    """Return (times_rel, cumulative_broken, has_failtime) relative to failtime.
+
+    Returns non-empty has_failtime even when 0 flows broke, so the caller can
+    still draw the failure marker and a flat-0 line for the cell.
+    """
     if not failtime:
-        return [], []
+        return [], [], False
     broke_times = sorted(
         f["broke_at"] for f in flows
         if f.get("status") == "broken" and f.get("broke_at") and f.get("established_at")
     )
     rel = [t - failtime for t in broke_times]
     cum = list(range(1, len(rel) + 1))
-    return rel, cum
+    return rel, cum, True
 
 
 def make_timeline_png(stats: dict, out_path: Path):
@@ -112,16 +116,41 @@ def make_timeline_png(stats: dict, out_path: Path):
         "ch-on_maglev-on":    "#27ae60",
     }
 
+    # First pass: compute global x window across all datasets with known failtime
+    all_rel = []
+    has_any_failtime = False
+    for tag, s in sorted(stats.items()):
+        rel, cum, has_ft = timeline_data(s["flows"], s.get("failtime"))
+        if has_ft:
+            has_any_failtime = True
+            all_rel.extend(rel)
+
+    if not has_any_failtime:
+        plt.close(fig)
+        return None
+
+    # window: show -90s…+60s by default; expand if data falls outside
+    x_min = min(-90, min(all_rel) - 5) if all_rel else -90
+    x_max = max(60,  max(all_rel) + 5) if all_rel else 60
+
     plotted = False
     for tag, s in sorted(stats.items()):
-        rel, cum = timeline_data(s["flows"], s.get("failtime"))
-        if not rel:
+        rel, cum, has_ft = timeline_data(s["flows"], s.get("failtime"))
+        if not has_ft:
             continue
         color = colors.get(tag, None)
-        label = tag.replace("_", " / ").replace("-", " ").replace("maglev", "Maglev")
-        ax.step([-999] + rel + [max(rel) * 1.1 if rel else 60],
-                [0]   + cum + [cum[-1] if cum else 0],
-                where="post", label=label, color=color, linewidth=1.8)
+        # human-readable label: "single node / ch off / Maglev off"
+        label = (tag.replace("_", " / ")
+                    .replace("-", " ")
+                    .replace("maglev", "Maglev"))
+        established = s.get("established", 0)
+        n_broken = len(cum)
+        suffix = f" — {n_broken}/{established} broken" if established else ""
+        # plot step from left window edge; flat at 0 if no breaks
+        xs = [x_min] + rel + [x_max]
+        ys = [0]     + cum + [cum[-1] if cum else 0]
+        ax.step(xs, ys, where="post",
+                label=label + suffix, color=color, linewidth=1.8)
         plotted = True
 
     if not plotted:
@@ -130,6 +159,7 @@ def make_timeline_png(stats: dict, out_path: Path):
 
     ax.axvline(0, color="black", linewidth=1.5, linestyle="--", label="failure (t=0)")
     ax.axvspan(0, 9, alpha=0.08, color="red", label="BGP holdtime (~9s)")
+    ax.set_xlim(x_min, x_max)
     ax.set_xlabel("Seconds relative to failure")
     ax.set_ylabel("Cumulative broken flows")
     ax.set_title("Cilium Maglev × Switch CH — flow breakage timeline")

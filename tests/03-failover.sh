@@ -168,6 +168,12 @@ run_cell() {
     docker exec "$CLIENT" test -s /tmp/${tag}.json && break; sleep 1
   done
   docker cp "${CLIENT}:/tmp/${tag}.json" "${RESULTS_DIR}/${tag}.json" >/dev/null 2>&1 || true
+  # inject failtime so visualise.py can draw the failure marker
+  if command -v jq >/dev/null 2>&1 && [ -s "${RESULTS_DIR}/${tag}.json" ]; then
+    local tmp; tmp=$(mktemp)
+    jq --argjson ft "$failtime" '.summary.failtime = $ft' "${RESULTS_DIR}/${tag}.json" > "$tmp" \
+      && mv "$tmp" "${RESULTS_DIR}/${tag}.json" || rm -f "$tmp"
+  fi
 
   local broken est pct
   if command -v jq >/dev/null 2>&1 && [ -s "${RESULTS_DIR}/${tag}.json" ]; then
