@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "WebFetch(domain:github.com)",
-      "Bash(MSYS_NO_PATHCONV=1 wsl -d Ubuntu-24.04 -u root -- bash -c 'ls /mnt/c/Users/Juan/Documents/Development/cilium-maglev-experiment/scripts/visuali* 2>/dev/null; ls /mnt/c/Users/Juan/Documents/Development/cilium-maglev-experiment/results/ 2>/dev/null | head -20')"
-    ]
-  }
-}

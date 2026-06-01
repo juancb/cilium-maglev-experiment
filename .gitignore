@@ -6,3 +6,6 @@ results/
 *.swp
 .DS_Store
 logs/*.log
+tests/hubble-linux-amd64.tar.gz
+tests/pwru
+.claude/
