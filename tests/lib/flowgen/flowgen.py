@@ -19,7 +19,8 @@ def now():
     return time.time()
 
 class Flow:
-    __slots__ = ("idx", "sock", "srcport", "backend", "status", "established_at", "broke_at")
+    __slots__ = ("idx", "sock", "srcport", "backend", "status",
+                 "established_at", "broke_at", "error_type")
     def __init__(self, idx):
         self.idx = idx
         self.sock = None
@@ -28,6 +29,29 @@ class Flow:
         self.status = "pending"      # pending | established | broken | closed
         self.established_at = None
         self.broke_at = None
+        self.error_type = None       # reset | timeout | peer_closed | other
+
+
+def classify_error(exc):
+    """Map a socket exception to a coarse error class.
+
+    Distinguishes a true RST (Maglev mismatch: wrong backend has no TCP state)
+    from a timeout/blackhole (transient reconvergence during BGP holdtime).
+    """
+    import errno as _errno
+    if isinstance(exc, socket.timeout):
+        return "timeout"
+    if isinstance(exc, ConnectionResetError):
+        return "reset"
+    err = getattr(exc, "errno", None)
+    if err == _errno.ECONNRESET:
+        return "reset"
+    if err in (_errno.ETIMEDOUT, _errno.EHOSTUNREACH, _errno.ENETUNREACH):
+        return "timeout"
+    # our own ConnectionError("peer closed") / ("closed before greeting")
+    if isinstance(exc, ConnectionError):
+        return "peer_closed"
+    return "other"
 
 def run_flow(flow, vip, port, src, stop_at, lock):
     try:
@@ -51,10 +75,11 @@ def run_flow(flow, vip, port, src, stop_at, lock):
         with lock:
             flow.status = "established"
             flow.established_at = now()
-    except Exception:
+    except Exception as exc:
         with lock:
             flow.status = "broken"
             flow.broke_at = now()
+            flow.error_type = classify_error(exc)
         return
 
     # hold open with a keepalive byte each second; a reset/blackhole trips send or recv
@@ -64,10 +89,11 @@ def run_flow(flow, vip, port, src, stop_at, lock):
             echo = s.recv(16)
             if not echo:
                 raise ConnectionError("peer closed")
-        except Exception:
+        except Exception as exc:
             with lock:
                 flow.status = "broken"
                 flow.broke_at = now()
+                flow.error_type = classify_error(exc)
             return
         time.sleep(0.100) # Changed by Juan to generate more traffic, 1 byte per second seems like it might miss transitions
     with lock:
@@ -121,7 +147,7 @@ def main():
     with lock:
         records = [{"idx": f.idx, "srcport": f.srcport, "backend": f.backend,
                     "status": f.status, "established_at": f.established_at,
-                    "broke_at": f.broke_at} for f in flows]
+                    "broke_at": f.broke_at, "error_type": f.error_type} for f in flows]
     broken = [r for r in records if r["status"] == "broken" and r["established_at"]]
     never  = [r for r in records if r["status"] == "broken" and not r["established_at"]]
     survived = [r for r in records if r["status"] in ("closed", "established")]
@@ -130,11 +156,21 @@ def main():
     for r in records:
         if r["backend"]:
             dist[r["backend"]] = dist.get(r["backend"], 0) + 1
+    # error-type breakdown among flows broken AFTER establishing (the meaningful set):
+    #   reset  → wrong backend had no TCP state (the Maglev-mismatch signal)
+    #   timeout→ transient blackhole during BGP reconvergence (NOT a Maglev failure)
+    err_breakdown = {}
+    for r in broken:
+        et = r["error_type"] or "other"
+        err_breakdown[et] = err_breakdown.get(et, 0) + 1
     summary = {
         "count": args.count,
         "established": len(broken) + len(survived),
         "never_established": len(never),
         "broken_after_establish": len(broken),
+        "broken_reset": err_breakdown.get("reset", 0),
+        "broken_timeout": err_breakdown.get("timeout", 0),
+        "broken_error_breakdown": err_breakdown,
         "survived": len(survived),
         "backend_distribution": dist,
     }
