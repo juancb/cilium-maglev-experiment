@@ -1,0 +1,104 @@
+# kube-prometheus-stack values for the cilium-maglev lab.
+# Grafana is exposed on NodePort 32002 → Windows http://localhost:32002
+# Prometheus retention: 7d.  Alertmanager disabled (not needed for lab).
+# Pre-wired datasources for Loki and Tempo.
+
+alertmanager:
+  enabled: false
+
+prometheus:
+  prometheusSpec:
+    retention: 7d
+    retentionSize: "4GB"
+    # scrape Hubble metrics directly (no ServiceMonitor CRD dependency)
+    additionalScrapeConfigs:
+      - job_name: hubble
+        static_configs:
+          - targets:
+              - 10.10.0.1:9965
+              - 10.10.0.2:9965
+              - 10.10.0.3:9965
+        relabel_configs:
+          - source_labels: [__address__]
+            regex: "10.10.0.([0-9]+):.*"
+            target_label: node
+            replacement: "node${1}"
+    serviceMonitorNamespaceSelector: {}
+    serviceMonitorSelector: {}
+    podMonitorNamespaceSelector: {}
+    podMonitorSelector: {}
+    resources:
+      requests:
+        cpu: 100m
+        memory: 512Mi
+      limits:
+        memory: 1Gi
+
+grafana:
+  adminPassword: "admin"
+  service:
+    type: NodePort
+    nodePort: 32002
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      url: http://loki:3100
+      access: proxy
+      isDefault: false
+    - name: Tempo
+      type: tempo
+      url: http://tempo:3100
+      access: proxy
+      isDefault: false
+      jsonData:
+        tracesToLogsV2:
+          datasourceUid: loki
+        lokiSearch:
+          datasourceUid: loki
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: cilium
+          orgId: 1
+          folder: Cilium
+          type: file
+          options:
+            path: /var/lib/grafana/dashboards/cilium
+  # pull the official Hubble / Cilium dashboards from grafana.com
+  dashboards:
+    cilium:
+      hubble-overview:
+        gnetId: 16611
+        revision: 1
+        datasource: Prometheus
+      cilium-operator:
+        gnetId: 16612
+        revision: 1
+        datasource: Prometheus
+
+# disable heavy components not needed for this lab
+kubeStateMetrics:
+  enabled: true
+nodeExporter:
+  enabled: true
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      memory: 128Mi

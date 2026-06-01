@@ -50,6 +50,7 @@ measure_ch() {
   step "starting 300 flows for CH ${mode} measurement"
   docker exec -d "$CLIENT" python3 /opt/flowgen/flowgen.py \
      --vip "$VIP" --port "$VIP_PORT" --count 300 --duration 40 \
+     --src 203.0.113.1 \
      --out "/tmp/ch_${mode}.json" --ready-file "/tmp/ch_${mode}.ready"
 
   local elapsed=0

@@ -67,6 +67,18 @@ make sweep           # vary B (and M) → results/sweep.csv + plot vs. predicted
 make down
 ```
 
+## Test reference
+
+| Script | Failure injection | What it proves |
+|--------|------------------|----------------|
+| `tests/01-fabric.sh` | Withdraw spine1's ToR uplink | Fabric is wired correctly; ToR consistent-hashing (CH) moves only ~1/3 of flows (CH on) vs ~2/3 (CH off) when a spine is removed |
+| `tests/02-cilium.sh` | None (read-only probe) | Cilium is in kube-proxy-replacement + native-routing + BPF-masquerade mode; with Maglev, every node selects the **same** backend for a given 5-tuple |
+| `tests/03-failover.sh` | Stop spine1 (ToR ECMP 3→2) | Headline 2×2: `{ToR CH on/off} × {Maglev on/off}` — measures reset % vs prediction `D·((M-1)/M)·((B-1)/B)` |
+| `tests/04b-dsr.sh` | Stop spine1 (same as Test 3) | DSR variant: Maglev on vs off with Direct Server Return active so the backend sees the original client IP — confirms Maglev selects the same live backend after re-homing |
+| `tests/04c-dsr.sh` | `kubectl drain` with long grace period | Node-drain variant: graceful pod eviction gives Maglev time to re-home flows to surviving backends; drain timeout >> flowgen socket timeout so no RSTs expected with Maglev on |
+
+**What is never done in 04b:** node interface failure, node isolation, or anything that takes a k8s node off the network. Spine failure only.
+
 ## What each test proves
 
 - **Test 1 (`tests/01-fabric.sh`)** — fabric is wired correctly *and* consistent hashing works:

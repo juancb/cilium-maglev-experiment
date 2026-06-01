@@ -19,6 +19,11 @@ endpointRoutes:
 bpf:
   masquerade: true
 
+socketLB:
+  hostNamespaceOnly: true
+
+devices: [eth0, k8s, fab0, fab1]
+
 ipam:
   mode: cluster-pool
   operator:
@@ -41,5 +46,19 @@ bgpControlPlane:
 
 operator:
   replicas: 1
+
 hubble:
-  enabled: false
+  enabled: true
+  relay:
+    enabled: true
+  ui:
+    enabled: true
+  metrics:
+    enabled:
+      - dns
+      - drop
+      - tcp
+      - flow
+      - port-distribution
+      - icmp
+      - "httpV2:exemplars=true;labelsContext=source_ip,source_namespace,source_workload,destination_ip,destination_namespace,destination_workload,traffic_direction"

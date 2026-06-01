@@ -29,11 +29,13 @@ class Flow:
         self.established_at = None
         self.broke_at = None
 
-def run_flow(flow, vip, port, stop_at, lock):
+def run_flow(flow, vip, port, src, stop_at, lock):
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         s.settimeout(5.0)
+        if src:
+            s.bind((src, 0))
         s.connect((vip, port))
         flow.srcport = s.getsockname()[1]
         # read the "POD=<name>\n" greeting to learn the backend
@@ -67,7 +69,7 @@ def run_flow(flow, vip, port, stop_at, lock):
                 flow.status = "broken"
                 flow.broke_at = now()
             return
-        time.sleep(1.0)
+        time.sleep(0.100) # Changed by Juan to generate more traffic, 1 byte per second seems like it might miss transitions
     with lock:
         if flow.status == "established":
             flow.status = "closed"
@@ -85,6 +87,8 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--ready-file", default=None,
                     help="touch this path once all flows are established (signals the harness)")
+    ap.add_argument("--src", default=None,
+                    help="source IP to bind before connect (e.g. 203.0.113.1)")
     args = ap.parse_args()
 
     lock = threading.Lock()
@@ -92,7 +96,7 @@ def main():
     stop_at = now() + args.duration
     threads = []
     for f in flows:
-        t = threading.Thread(target=run_flow, args=(f, args.vip, args.port, stop_at, lock),
+        t = threading.Thread(target=run_flow, args=(f, args.vip, args.port, args.src, stop_at, lock),
                              daemon=True)
         t.start()
         threads.append(t)

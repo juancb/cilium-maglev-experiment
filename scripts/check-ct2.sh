@@ -12,6 +12,7 @@ echo "=== starting 20 flows to VIP ==="
 docker exec "$CLIENT" rm -f /tmp/ct_test.json /tmp/ct_test.ready 2>/dev/null || true
 docker exec -d "$CLIENT" python3 /opt/flowgen/flowgen.py \
     --vip "$VIP" --port 8080 --count 20 --duration 30 \
+    --src 203.0.113.1 \
     --out /tmp/ct_test.json --ready-file /tmp/ct_test.ready
 
 # wait for flows to establish

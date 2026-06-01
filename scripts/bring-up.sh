@@ -94,11 +94,17 @@ bash "${REPO}/scripts/start-nodes.sh"
 info "moving fabric veths into node containers"
 bash "${REPO}/scripts/fix-node-veths.sh"
 
-# ── 5. Start bird + networking on each node ───────────────────────────────────
+# ── 5. Set L4 ECMP hash policy on fabric nodes ───────────────────────────────
+# Without policy=1 (L4), flows with identical src/dst IP all hash to the same
+# next-hop regardless of source port, so node failover tests see no disruption.
+info "setting L4 ECMP hash policy on fabric nodes"
+bash "${REPO}/scripts/set-ecmp-l4-hash.sh"
+
+# ── 6. Start bird + networking on each node ───────────────────────────────────
 info "starting node networking (addressing, cgroups, bird)"
 bash "${REPO}/scripts/run-node-startup.sh"
 
-# ── 6. k3s + Cilium + demo app ────────────────────────────────────────────────
+# ── 7. k3s + Cilium + demo app ────────────────────────────────────────────────
 if $SKIP_K3S; then
   yellow "skipping k3s/Cilium (--skip-k3s)"
   green "fabric is up. run 'bash scripts/cluster-up.sh' when ready."

@@ -84,6 +84,7 @@ run_cell() {
   docker exec "$CLIENT" rm -f /tmp/${tag}.json /tmp/${tag}.ready 2>/dev/null || true
   docker exec -d "$CLIENT" python3 /opt/flowgen/flowgen.py \
       --vip "$VIP" --port "$VIP_PORT" --count "$N" --duration "$DUR" \
+      --src 203.0.113.1 \
       --out "/tmp/${tag}.json" --ready-file "/tmp/${tag}.ready"
 
   local elapsed=0
@@ -96,8 +97,9 @@ run_cell() {
   sleep 3
 
   local failtime; failtime=$(date +%s)
-  info "stopping ${FAIL_NODE}"
-  docker stop "$FAIL_NODE" >/dev/null
+  info "failing ${FAIL_NODE} (fabric links down)"
+  docker exec "$FAIL_NODE" ip link set fab0 down
+  docker exec "$FAIL_NODE" ip link set fab1 down
 
   local wait_secs=$(( DUR > 20 ? DUR-15 : 10 ))
   for i in $(seq 1 "$wait_secs"); do
@@ -105,9 +107,9 @@ run_cell() {
     [ $(( i % 5 )) -eq 0 ] && step "post-failure wait: ${i}/${wait_secs}s"
   done
 
-  step "restoring ${FAIL_NODE} after failure"
-  docker start "$FAIL_NODE" >/dev/null
-  bash "${REPO_ROOT}/scripts/fix-node-veths.sh" "$FAIL_NODE" 2>/dev/null || true
+  step "restoring ${FAIL_NODE} (fabric links up)"
+  docker exec "$FAIL_NODE" ip link set fab0 up
+  docker exec "$FAIL_NODE" ip link set fab1 up
 
   step "collecting results from flowgen"
   for _ in $(seq 1 30); do

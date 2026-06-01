@@ -23,6 +23,11 @@ endpointRoutes:
 bpf:
   masquerade: true
 
+socketLB:
+  hostNamespaceOnly: true
+
+devices: [eth0, k8s, fab0, fab1]
+
 ipam:
   mode: cluster-pool
   operator:
@@ -34,7 +39,7 @@ ipam:
 loadBalancer:
   algorithm: random                  # independent random selection per ingress node
   mode: dsr                          # Direct Server Return — preserves client IP at backend
-  # dsrDispatch: ipopt               # default; switch to geneve if ipopt fails in WSL2
+  dsrDispatch: opt                   # IP options dispatch; native routing (geneve needs tunnel mode)
 # -------------------------------------------------------------------------------------
 
 bgpControlPlane:
@@ -42,5 +47,19 @@ bgpControlPlane:
 
 operator:
   replicas: 1
+
 hubble:
-  enabled: false
+  enabled: true
+  relay:
+    enabled: true
+  ui:
+    enabled: true
+  metrics:
+    enabled:
+      - dns
+      - drop
+      - tcp
+      - flow
+      - port-distribution
+      - icmp
+      - "httpV2:exemplars=true;labelsContext=source_ip,source_namespace,source_workload,destination_ip,destination_namespace,destination_workload,traffic_direction"

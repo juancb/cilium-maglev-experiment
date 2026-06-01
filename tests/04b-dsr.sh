@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# Test 4B — DSR mode: the configuration that makes Maglev observable.
+# Test 4B — DSR mode: Maglev observable via spine switch failure (ToR ECMP re-hash).
 #
-# loadBalancer.mode=dsr preserves the original client IP end-to-end.
-# When a flow re-homes to a different ingress node after a failure:
+# Failure injection: take down all peering links on FAIL_SPINE → ToR loses 1 of 3
+# ECMP paths → ~1/3 of flows re-home to a different ingress node. All backend pods
+# remain alive throughout. This is the clean signal for Maglev consistency.
+#
 #   Maglev off: new ingress picks random backend → different pod → no TCP state → RST (~28%)
-#   Maglev on:  new ingress picks SAME backend (same 5-tuple, same hash) → pod has state → survives (~0%)
+#   Maglev on:  new ingress picks SAME backend (same 5-tuple hash) → pod has state → survives (~0%)
 #
-# Run scripts/probe-source-ip.sh first to confirm DSR is working (pod sees 203.0.113.1).
-# If the no-Maglev cell shows 0% broken, DSR is likely not working — try dsrDispatch=geneve.
+# NOTE: we never fail node interfaces or kill nodes in this test. See 04c-dsr.sh for
+# the node-drain variant.
 #
 # Env knobs: N=<flows> (default 300)   DUR=<sec> (default 50)
+#            FAIL_SPINE=<container>     (default clab-maglev-clos-spine1)
 set -euo pipefail
 cd "$(dirname "$0")"
 . lib/common.sh
@@ -17,7 +20,7 @@ SECONDS=0
 
 N="${N:-300}"; DUR="${DUR:-50}"
 N1="${PFX}-node1"
-FAIL_NODE="${PFX}-node2"
+FAIL_SPINE="${FAIL_SPINE:-${PFX}-spine2}"
 HELM_VALUES_DIR="/opt/k8s"
 declare -A RESULT
 
@@ -26,21 +29,25 @@ set_cilium_values() {
   info "applying ${vals} (helm upgrade + rollout restart)"
   docker exec -e KUBECONFIG=/etc/rancher/k3s/k3s.yaml "$N1" \
       helm upgrade cilium cilium/cilium -n kube-system \
-      -f "${HELM_VALUES_DIR}/${vals}" --reuse-values >/dev/null
+      -f "${HELM_VALUES_DIR}/${vals}" --reset-values \
+      --set loadBalancer.dsrDispatch=opt >/dev/null
   step "triggering rolling restart of cilium DaemonSet"
   docker exec "$N1" k3s kubectl -n kube-system rollout restart ds/cilium >/dev/null
   step "waiting for rollout to complete"
-  docker exec "$N1" k3s kubectl -n kube-system rollout status ds/cilium --timeout=180s 2>&1 | sed 's/^/  /'
+  docker exec "$N1" k3s kubectl -n kube-system rollout status ds/cilium --timeout=300s 2>&1 | sed 's/^/  /'
   sleep 5
 }
 
 cleanup() {
-  info "Restoring original Cilium values (maglev + snat)..."
+  info "Restoring spine and Cilium values..."
+  docker exec "$FAIL_SPINE" bash -c \
+    "for i in \$(ip link show | awk -F': ' '/^[0-9]/{print \$2}' | grep -vE '^(lo|eth0)$'); do
+       ip link set \$i up 2>/dev/null || true; done" 2>/dev/null || true
   docker exec -e KUBECONFIG=/etc/rancher/k3s/k3s.yaml "$N1" \
       helm upgrade cilium cilium/cilium -n kube-system \
-      -f "${HELM_VALUES_DIR}/cilium-values-maglev.yaml" --reuse-values >/dev/null 2>&1 || true
+      -f "${HELM_VALUES_DIR}/cilium-values-maglev.yaml" --reset-values >/dev/null 2>&1 || true
   docker exec "$N1" k3s kubectl -n kube-system rollout restart ds/cilium >/dev/null 2>&1 || true
-  docker exec "$N1" k3s kubectl -n kube-system rollout status ds/cilium --timeout=120s 2>&1 | sed 's/^/  /' || true
+  docker exec "$N1" k3s kubectl -n kube-system rollout status ds/cilium --timeout=300s 2>&1 | sed 's/^/  /' || true
 }
 trap cleanup EXIT
 
@@ -53,7 +60,7 @@ s.settimeout(10)
 try:
     s.connect(('${VIP}', ${VIP_PORT}))
     data = b''
-    while data.count(b'\\n') < 1:
+    while data.count(b'\\n') < 2:
         chunk = s.recv(256)
         if not chunk: break
         data += chunk
@@ -64,48 +71,63 @@ finally:
     s.close()
 "
   RESP=$(echo "$PROBE_PY" | docker exec -i "${CLIENT}" python3 2>/dev/null || true)
-  FIRST=$(echo "$RESP" | head -1 | tr -d '\r')
-  if echo "$FIRST" | grep -qE '^SRCIP='; then
-    SRCIP=$(echo "$FIRST" | cut -d= -f2)
-    if echo "$SRCIP" | grep -qE '^172\.30\.'; then
-      yellow "  WARNING: pod sees ${SRCIP} — DSR may not be active yet"
-      yellow "  If no-Maglev cell shows 0%, switch to dsrDispatch: geneve in values files"
-    elif echo "$SRCIP" | grep -qE '^203\.0\.113\.'; then
+  SRCIP_LINE=$(echo "$RESP" | grep '^SRCIP=' | head -1 | tr -d '\r')
+  if [ -n "$SRCIP_LINE" ]; then
+    SRCIP=$(echo "$SRCIP_LINE" | cut -d= -f2)
+    if echo "$SRCIP" | grep -qE '^203\.0\.113\.'; then
       green "  DSR confirmed: pod sees ${SRCIP} (original client IP)"
+    else
+      yellow "  WARNING: pod sees ${SRCIP} — DSR may not be active (SNAT masking source)"
     fi
   else
-    yellow "  (SRCIP not in response — run scripts/probe-source-ip.sh for a full check)"
+    yellow "  (SRCIP not in response)"
   fi
+}
+
+fail_spine() {
+  info "failing ${FAIL_SPINE} (all peering interfaces down)"
+  docker exec "$FAIL_SPINE" bash -c \
+    "for i in \$(ip link show | awk -F': ' '/^[0-9]/{print \$2}' | grep -vE '^(lo|eth0)$'); do
+       ip link set \$i down 2>/dev/null || true; done"
+}
+
+restore_spine() {
+  step "restoring ${FAIL_SPINE} (peering interfaces up)"
+  docker exec "$FAIL_SPINE" bash -c \
+    "for i in \$(ip link show | awk -F': ' '/^[0-9]/{print \$2}' | grep -vE '^(lo|eth0)$'); do
+       ip link set \$i up 2>/dev/null || true; done"
+}
+
+ensure_spine_up() {
+  restore_spine
+  step "waiting for VIP ECMP to reconverge (≥2 nexthops at leaf1)"
+  wait_vip_ecmp 60 || yellow "  INFO: VIP ECMP not fully reconverged — proceeding anyway"
 }
 
 run_cell() {
   local tag="$1"
   info "=== cell: ${tag} ==="
 
-  step "restoring ${FAIL_NODE}"
-  docker start "$FAIL_NODE" >/dev/null 2>&1 || true
-  bash "${REPO_ROOT}/scripts/fix-node-veths.sh" "$FAIL_NODE" 2>/dev/null || true
-  docker exec -d "$FAIL_NODE" bash /opt/startup.sh 2>/dev/null || true
-  wait_vip_ecmp 60 || yellow "  INFO: VIP ECMP not fully reconverged"
+  ensure_spine_up
 
   step "starting ${N} flows (duration ${DUR}s)"
   docker exec "$CLIENT" rm -f /tmp/${tag}.json /tmp/${tag}.ready 2>/dev/null || true
   docker exec -d "$CLIENT" python3 /opt/flowgen/flowgen.py \
       --vip "$VIP" --port "$VIP_PORT" --count "$N" --duration "$DUR" \
+      --src 203.0.113.1 \
       --out "/tmp/${tag}.json" --ready-file "/tmp/${tag}.ready"
 
   local elapsed=0
   for _ in $(seq 1 30); do
     docker exec "$CLIENT" test -f /tmp/${tag}.ready && break
     sleep 1; elapsed=$(( elapsed + 1 ))
-    [ $(( elapsed % 5 )) -eq 0 ] && step "waiting for ${N} flows to establish... (${elapsed}s)"
+    [ $(( elapsed % 5 )) -eq 0 ] && step "waiting for flows to establish... (${elapsed}s)"
   done
   step "flows established; sleeping 3s before failure injection"
   sleep 3
 
   local failtime; failtime=$(date +%s)
-  info "stopping ${FAIL_NODE}"
-  docker stop "$FAIL_NODE" >/dev/null
+  fail_spine
 
   local wait_secs=$(( DUR > 20 ? DUR-15 : 10 ))
   for i in $(seq 1 "$wait_secs"); do
@@ -113,9 +135,7 @@ run_cell() {
     [ $(( i % 5 )) -eq 0 ] && step "post-failure wait: ${i}/${wait_secs}s (collecting RSTs)"
   done
 
-  step "restoring ${FAIL_NODE} after failure"
-  docker start "$FAIL_NODE" >/dev/null
-  bash "${REPO_ROOT}/scripts/fix-node-veths.sh" "$FAIL_NODE" 2>/dev/null || true
+  restore_spine
 
   step "collecting results from flowgen"
   for _ in $(seq 1 30); do
@@ -144,9 +164,9 @@ run_cell() {
   green "  cell result: ${broken} broken of ${est} established (${pct}%)"
 }
 
-info "Test 4B setup: N=${N} flows, DUR=${DUR}s, ETP=Cluster, 6 replicas"
-step "scaling echo to 6 replicas"
-kc -n default scale deploy/echo --replicas=6 >/dev/null 2>&1 || true
+info "Test 4B setup: N=${N} flows, DUR=${DUR}s, spine failure=${FAIL_SPINE}"
+step "scaling echo to 3 replicas"
+kc -n default scale deploy/echo --replicas=3 >/dev/null 2>&1 || true
 kc -n default rollout status deploy/echo --timeout=120s 2>&1 | sed 's/^/  /'
 
 info "--- DSR + Maglev OFF ---"
@@ -160,18 +180,13 @@ probe_srcip
 run_cell "dsr_maglev-on"
 
 echo
-green "================ DSR broken-flow results ================================"
+green "================ Test 4B: DSR + Spine Failure results =================="
 printf '%-40s %s\n' "DSR + Maglev off:" "${RESULT[dsr_maglev-off]:-?}"
 printf '%-40s %s\n' "DSR + Maglev on: " "${RESULT[dsr_maglev-on]:-?}"
 echo
-echo "Predicted (M=3 nodes, B=6 backends):"
-echo "  DSR + Maglev off: ~28%  (1/3 re-home × 5/6 wrong backend)"
+echo "Predicted (M=3 nodes, B=3 backends, 1 spine of 3 fails → ~1/3 re-home):"
+echo "  DSR + Maglev off: ~22%  (1/3 re-home × 2/3 wrong backend)"
 echo "  DSR + Maglev on:  ~0%   (Maglev selects same backend; pod has state)"
 echo
-if [ "${RESULT[dsr_maglev-off]:-?}" != "?" ] && \
-   echo "${RESULT[dsr_maglev-off]}" | grep -qE '^\?|0/'; then
-  yellow "WARNING: Maglev-off cell shows 0% — DSR may not be working."
-  yellow "Try uncommenting dsrDispatch: geneve in k8s/cilium-values-dsr-*.yaml"
-fi
 echo "Raw JSON: ${RESULTS_DIR}/"
 green "Runtime: $(fmt_duration)"

@@ -18,6 +18,7 @@ echo "node1=$POD1  node2=$POD2  node3=$POD3"
 docker exec "$CLIENT" rm -f /tmp/trace.ready /tmp/trace.json
 docker exec -d "$CLIENT" python3 /opt/flowgen/flowgen.py \
     --vip "$VIP" --port 8080 --count 1 --duration 20 \
+    --src 203.0.113.1 \
     --out /tmp/trace.json --ready-file /tmp/trace.ready
 
 for _ in $(seq 1 10); do

@@ -12,6 +12,7 @@ echo "=== starting 5 flows to VIP ==="
 docker exec "$CLIENT" rm -f /tmp/dct.ready /tmp/dct.json 2>/dev/null || true
 docker exec -d "$CLIENT" python3 /opt/flowgen/flowgen.py \
     --vip "$VIP" --port 8080 --count 5 --duration 40 \
+    --src 203.0.113.1 \
     --out /tmp/dct.json --ready-file /tmp/dct.ready
 
 for _ in $(seq 1 15); do

@@ -55,8 +55,44 @@ kc apply -f /opt/k8s/cilium-bgp.yaml
 kc apply -f /opt/k8s/demo-app.yaml
 kc -n default rollout status deploy/echo --timeout=180s || true
 
+info "applying Hubble UI NodePort (internal reference only — UI served via port-forward)"
+kc apply -f /opt/k8s/hubble-nodeport.yaml
+
 info "waiting for VIP to appear in the fabric"
 wait_vip_ecmp 60 && green "VIP ${VIP} is ECMP in the fabric" \
                  || yellow "VIP not yet ECMP — check 'cilium bgp routes' and bird sessions"
 
+# ── Observability stack ──────────────────────────────────────────────────────
+info "adding Helm repos for observability stack"
+helm1 repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
+helm1 repo add grafana https://grafana.github.io/helm-charts >/dev/null 2>&1 || true
+helm1 repo update >/dev/null
+
+info "installing kube-prometheus-stack (Prometheus + Grafana) — Windows: http://localhost:32002 admin/admin"
+helm1 upgrade --install kube-prometheus prometheus-community/kube-prometheus-stack \
+    -n monitoring --create-namespace \
+    -f /opt/k8s/prometheus-values.yaml \
+    --timeout 8m || yellow "kube-prometheus-stack install had warnings (check: kubectl -n monitoring get pods)"
+
+info "installing Loki + Promtail (log aggregation, 7d retention)"
+helm1 upgrade --install loki grafana/loki \
+    -n monitoring \
+    -f /opt/k8s/loki-values.yaml \
+    --timeout 5m || yellow "Loki install had warnings"
+
+info "installing Tempo (distributed tracing, 7d retention)"
+helm1 upgrade --install tempo grafana/tempo \
+    -n monitoring \
+    -f /opt/k8s/tempo-values.yaml \
+    --timeout 5m || yellow "Tempo install had warnings"
+
+info "starting kubectl port-forwards (Hubble UI :18080, Grafana :18081)"
+docker exec -d "${PFX}-node1" bash -c \
+  'KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl port-forward -n kube-system svc/hubble-ui 18080:80 --address 0.0.0.0 &>/var/log/pf-hubble.log'
+docker exec -d "${PFX}-node1" bash -c \
+  'KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl port-forward -n monitoring svc/kube-prometheus-grafana 18081:80 --address 0.0.0.0 &>/var/log/pf-grafana.log'
+sleep 3
+
 green "cluster up."
+green "  Hubble UI  → http://localhost:18080"
+green "  Grafana    → http://localhost:18081  (admin / admin)"

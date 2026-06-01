@@ -43,6 +43,7 @@ docker exec "$CLIENT" rm -f /tmp/${TAG}.json /tmp/${TAG}.ready 2>/dev/null || tr
 info "starting ${N} flows via flowgen..."
 docker exec -d "$CLIENT" python3 /opt/flowgen/flowgen.py \
     --vip "$VIP" --port "$VIP_PORT" --count "$N" --duration "$DUR" \
+    --src 203.0.113.1 \
     --out "/tmp/${TAG}.json" --ready-file "/tmp/${TAG}.ready"
 
 for _ in $(seq 1 30); do

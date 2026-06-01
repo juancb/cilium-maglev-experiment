@@ -17,6 +17,14 @@ for ID in 1 2 3; do
   # Remove if exists
   docker rm -f "$NAME" 2>/dev/null || true
 
+  # node1 publishes ports so Windows can reach UIs at localhost:PORT.
+  # Use high non-NodePort ports so Cilium BPF doesn't pre-reserve them;
+  # kubectl port-forward inside node1 bridges these to the actual pods.
+  #   18080 → Hubble UI    (http://localhost:18080)
+  #   18081 → Grafana      (http://localhost:18081)
+  EXTRA_PORTS=""
+  [ "$ID" -eq 1 ] && EXTRA_PORTS="-p 18080:18080 -p 18081:18081"
+
   docker run -d \
     --name "$NAME" \
     --hostname "node${ID}" \
@@ -27,6 +35,7 @@ for ID in 1 2 3; do
     -v "${REPO}/nodes/bird/node${ID}.conf:/etc/bird/bird.conf:ro" \
     -v "${REPO}/nodes/startup/node.sh:/opt/startup.sh:ro" \
     -v "${REPO}/k8s:/opt/k8s:ro" \
+    $EXTRA_PORTS \
     maglev/k3s-bird:latest \
     sleep infinity
 

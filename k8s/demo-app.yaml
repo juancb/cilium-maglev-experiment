@@ -1,6 +1,6 @@
 # Demo backend + LoadBalancer service for the failover experiment.
 #
-# The server sends "POD=<name>\n" on connect, then echoes — so flowgen can record which backend
+# The server sends "POD=<name>\nSRCIP=<client-ip>\n" on connect, then echoes — so flowgen can record which backend
 # served each long-lived TCP connection and detect resets. Service is type LoadBalancer with a
 # fixed VIP and externalTrafficPolicy=Cluster (so any ingress node forwards to any backend,
 # which is exactly what exercises cross-node Maglev backend selection).
@@ -17,9 +17,9 @@ data:
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("0.0.0.0", 8080)); srv.listen(2048)
-    def handle(c):
+    def handle(c, addr):
         try:
-            c.sendall(("POD=%s\n" % name).encode())
+            c.sendall(("POD=%s\nSRCIP=%s\n" % (name, addr[0])).encode())
             while True:
                 d = c.recv(1024)
                 if not d: break
@@ -29,8 +29,8 @@ data:
         finally:
             c.close()
     while True:
-        conn, _ = srv.accept()
-        threading.Thread(target=handle, args=(conn,), daemon=True).start()
+        conn, addr = srv.accept()
+        threading.Thread(target=handle, args=(conn, addr), daemon=True).start()
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -39,25 +39,13 @@ metadata:
   namespace: default
   labels: { app: echo }
 spec:
-  replicas: 6                       # B backends; sweep overrides this
+  replicas: 3                       # B backends; sweep overrides this
   selector:
     matchLabels: { app: echo }
   template:
     metadata:
       labels: { app: echo }
     spec:
-      # Backends must NOT run on node2 (the node we fail in Test 3).
-      # If backends were on node2, they'd die with the node, making all
-      # node2-ingressed flows fail regardless of Maglev/random.
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: NotIn
-                    values:
-                      - node2
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname

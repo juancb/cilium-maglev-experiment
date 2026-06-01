@@ -10,6 +10,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         bird2 iproute2 iptables ipset kmod \
         curl ca-certificates jq conntrack ethtool tcpdump iputils-ping \
         procps less vim-tiny \
+        # network debug (netshoot-equivalent)
+        mtr iperf3 nmap ncat traceroute dublin-traceroute scamper dnsutils netcat-openbsd \
+        # kernel / BPF debug
+        strace linux-tools-common bpfcc-tools bpftrace \
+        # bpf helpers
+        linux-headers-generic \
     && rm -rf /var/lib/apt/lists/*
 
 # k3s binary (pin a recent stable; override with --build-arg K3S_VERSION=...)
@@ -24,6 +30,12 @@ RUN curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm
     && CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt) \
     && curl -fsSL "https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-amd64.tar.gz" \
         | tar xz -C /usr/local/bin cilium
+
+# pwru — Cilium's packet-walks-routes-units tool (BPF-powered per-packet tracer)
+ARG PWRU_VERSION=v1.0.11
+RUN curl -fsSL "https://github.com/cilium/pwru/releases/download/${PWRU_VERSION}/pwru-linux-amd64.tar.gz" \
+        | tar xz -C /usr/local/bin pwru \
+    && chmod +x /usr/local/bin/pwru
 
 RUN mkdir -p /etc/bird /run/bird
 CMD ["sleep", "infinity"]

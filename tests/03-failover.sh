@@ -94,31 +94,10 @@ restore_spine() {
 }
 
 restore_node() {
-  step "starting ${FAIL_TARGET}"
-  docker start "$FAIL_TARGET" >/dev/null 2>&1 || true
-  sleep 0.5
-  if ! docker exec "$FAIL_TARGET" ip link show fab0 >/dev/null 2>&1; then
-    local node="${FAIL_TARGET#${PFX}-}"
-    step "rewiring fabric veths for ${node}"
-    bash "${REPO_ROOT}/scripts/rewire-node-veths.sh" "$node" 2>/dev/null || true
-    docker exec -d "$FAIL_TARGET" bash /opt/startup.sh 2>/dev/null || true
-  fi
-  if ! docker exec "$FAIL_TARGET" bash -c 'pgrep -f "k3s agent" >/dev/null 2>&1'; then
-    local token; token=$(docker exec "${PFX}-node1" cat /var/lib/rancher/k3s/server/node-token)
-    local node_num="${FAIL_TARGET##*node}"
-    docker exec "$FAIL_TARGET" bash -c 'rm -rf /run/k3s /var/run/k3s 2>/dev/null; true'
-    docker exec -d "$FAIL_TARGET" bash -lc \
-      "k3s agent --server https://10.10.0.1:6443 --token ${token} --node-ip 10.10.0.${node_num} \
-       --snapshotter=native >/var/log/k3s.log 2>&1"
-    yellow "  restarted k3s agent on ${FAIL_TARGET}"
-    local elapsed=0
-    for _ in $(seq 1 90); do
-      kc get node "node${node_num}" --no-headers 2>/dev/null | grep -q ' Ready' && break
-      elapsed=$(( elapsed + 3 ))
-      [ $(( elapsed % 15 )) -eq 0 ] && step "waiting for node${node_num} Ready... (${elapsed}s)"
-      sleep 3
-    done
-  fi
+  step "restoring ${FAIL_TARGET} (fabric links up)"
+  docker exec "$FAIL_TARGET" ip link set fab0 up 2>/dev/null || true
+  docker exec "$FAIL_TARGET" ip link set fab1 up 2>/dev/null || true
+  wait_vip_ecmp 60 || yellow "  WARNING: VIP ECMP not fully reconverged after node restore"
 }
 
 restore_fail_target() {
@@ -139,6 +118,7 @@ run_cell() {
   docker exec "$CLIENT" rm -f /tmp/${tag}.json /tmp/${tag}.ready 2>/dev/null || true
   docker exec -d "$CLIENT" python3 /opt/flowgen/flowgen.py \
       --vip "$VIP" --port "$VIP_PORT" --count "$N" --duration "$DUR" \
+      --src 203.0.113.1 \
       --out "/tmp/${tag}.json" --ready-file "/tmp/${tag}.ready"
 
   local elapsed=0
@@ -152,8 +132,14 @@ run_cell() {
 
   local failtime; failtime=$(date +%s)
   local fail_secs="${SECONDS}"
-  info "stopping ${FAIL_TARGET} at t=${fail_secs}s"
-  docker stop "$FAIL_TARGET" >/dev/null
+  if [ "$TEST_MODE" = "spine-failure" ]; then
+    info "stopping ${FAIL_TARGET} (spine) at t=${fail_secs}s"
+    docker stop "$FAIL_TARGET" >/dev/null
+  else
+    info "failing ${FAIL_TARGET} (node fabric links down) at t=${fail_secs}s"
+    docker exec "$FAIL_TARGET" ip link set fab0 down
+    docker exec "$FAIL_TARGET" ip link set fab1 down
+  fi
 
   local wait_secs=$(( DUR > 20 ? DUR-15 : 10 ))
   for i in $(seq 1 "$wait_secs"); do

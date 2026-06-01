@@ -1,0 +1,29 @@
+# Tempo single-binary, local filesystem, 7-day trace retention.
+tempo:
+  reportingEnabled: false
+  storage:
+    trace:
+      backend: local
+      local:
+        path: /var/tempo/traces
+      wal:
+        path: /var/tempo/wal
+  retention: 168h   # 7 days
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "0.0.0.0:4317"
+        http:
+          endpoint: "0.0.0.0:4318"
+    zipkin:
+      endpoint: "0.0.0.0:9411"
+
+persistence:
+  enabled: false
