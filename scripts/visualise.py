@@ -61,10 +61,26 @@ def flow_stats(data: dict) -> dict:
         if not failtime and broken:
             failtime = min(f.get("broke_at", 0) for f in broken if f.get("broke_at"))
         backends = list({f.get("backend", "?") for f in flows if f.get("backend")})
+        # Prefer the multi-run aggregate (mean ± stddev) when present; the single-
+        # run pct above is only the last run and not what we report.
+        agg = summary.get("aggregate")
+        stddev = 0.0
+        n_runs = 1
+        reset_pct = timeout_pct = None
+        if agg:
+            pct = agg.get("broken_pct_mean", pct)
+            stddev = agg.get("broken_pct_stddev", 0.0)
+            n_runs = agg.get("n_runs", 1)
+            reset_pct = agg.get("reset_pct_mean")
+            timeout_pct = agg.get("timeout_pct_mean")
         stats[tag] = {
             "established": established,
             "broken": len(broken),
             "pct": pct,
+            "stddev": stddev,
+            "n_runs": n_runs,
+            "reset_pct": reset_pct,
+            "timeout_pct": timeout_pct,
             "failtime": failtime,
             "backends": backends,
             "flows": flows,
@@ -232,21 +248,19 @@ EXPECTED = {
     "single-node_ch-on_maglev-off":    28,   # CH at spine doesn't affect leaf-level node selection
     "single-node_ch-off_maglev-on":     0,   # Maglev picks same backend on new agent
     "single-node_ch-on_maglev-on":      0,
-    # Leaf failure (SNAT): ~1/3 re-homed, 2/3 wrong backend
+    # Leaf failure — ~1/3 re-homed, wrong backend without Maglev
     "snat-leaf-failure_maglev-off": 22,
     "snat-leaf-failure_maglev-on":   0,
-    # Leaf failure (DSR): same math, client IP preserved
-    "tor-failure-dsr_maglev-off": 22,
-    "tor-failure-dsr_maglev-on":   0,
-    # Node drain (SNAT): no CH on leaves, ECMP 3→2 full rehash → ~2/3 re-homed
+    "dsr-leaf-failure_maglev-off":  22,
+    "dsr-leaf-failure_maglev-on":    0,
+    # Node drain WITH fabric cut — full ECMP rehash; ON cell capped by backends on drained node
     "snat-node-drain_maglev-off": 44,
     "snat-node-drain_maglev-on":   0,
-    # Node drain (DSR): same math
-    "dsr-drain-node_maglev-off": 44,
-    "dsr-drain-node_maglev-on":   0,
-    # DSR: client IP preserved; Maglev must match on the new ingress node
-    "dsr_maglev-off":       22,
-    "dsr_maglev-on":         0,
+    "dsr-node-drain_maglev-off":  44,
+    "dsr-node-drain_maglev-on":    0,
+    # Graceful drain (pure re-homing, backends safe) — the clean Maglev test
+    "graceful-drain_maglev-off": 40,
+    "graceful-drain_maglev-on":   0,
     # ETP=Local: pod must be local to the ingress node; re-homed flows always lose local pod
     "etp-local_maglev-off": 33,
     "etp-local_maglev-on":  33,
@@ -386,15 +400,18 @@ def main():
 
     stats = flow_stats(data)
 
-    print(f"\n{'Cell':<35} {'Est':>6} {'Broken':>8} {'%':>7} {'Pred':>7}")
-    print("-" * 65)
+    print(f"\n{'Cell':<33} {'runs':>4} {'broken% (mean±sd)':>20} {'reset%':>7} {'to%':>6} {'Pred':>6}")
+    print("-" * 82)
     for tag in sorted(stats.keys()):
         s = stats[tag]
         exp = EXPECTED.get(tag, "—")
         mark = ""
         if isinstance(exp, int):
             mark = "OK" if abs(s["pct"] - exp) <= 5 else "!!"
-        print(f"  {tag:<33} {s['established']:>6} {s['broken']:>8} {s['pct']:>6.1f}% {str(exp)+'%':>7} {mark}")
+        meansd = f"{s['pct']:.1f}±{s['stddev']:.1f}"
+        rp = f"{s['reset_pct']:.1f}" if s.get("reset_pct") is not None else "—"
+        tp = f"{s['timeout_pct']:.1f}" if s.get("timeout_pct") is not None else "—"
+        print(f"  {tag:<31} {s['n_runs']:>4} {meansd:>20} {rp:>7} {tp:>6} {str(exp)+'%':>6} {mark}")
 
     print()
     if not HAS_MPL:
