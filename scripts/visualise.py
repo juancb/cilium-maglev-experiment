@@ -233,14 +233,14 @@ EXPECTED = {
     "single-node_ch-off_maglev-on":     0,   # Maglev picks same backend on new agent
     "single-node_ch-on_maglev-on":      0,
     # Leaf failure (SNAT): ~1/3 re-homed, 2/3 wrong backend
-    "leaf-failure_maglev-off": 22,
-    "leaf-failure_maglev-on":   0,
+    "snat-leaf-failure_maglev-off": 22,
+    "snat-leaf-failure_maglev-on":   0,
     # Leaf failure (DSR): same math, client IP preserved
     "tor-failure-dsr_maglev-off": 22,
     "tor-failure-dsr_maglev-on":   0,
     # Node drain (SNAT): no CH on leaves, ECMP 3→2 full rehash → ~2/3 re-homed
-    "node-drain_maglev-off": 44,
-    "node-drain_maglev-on":   0,
+    "snat-node-drain_maglev-off": 44,
+    "snat-node-drain_maglev-on":   0,
     # Node drain (DSR): same math
     "dsr-drain-node_maglev-off": 44,
     "dsr-drain-node_maglev-on":   0,

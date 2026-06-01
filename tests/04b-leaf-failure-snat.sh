@@ -140,16 +140,16 @@ kc -n default rollout status deploy/echo --timeout=120s 2>&1 | sed 's/^/  /'
 
 info "--- SNAT + Maglev OFF ---"
 set_cilium_values "cilium-values-nomaglev.yaml"
-run_cell "leaf-failure_maglev-off"
+run_cell "snat-leaf-failure_maglev-off"
 
 info "--- SNAT + Maglev ON ---"
 set_cilium_values "cilium-values-maglev.yaml"
-run_cell "leaf-failure_maglev-on"
+run_cell "snat-leaf-failure_maglev-on"
 
 echo
 green "================ Test 4B-SNAT: Leaf Failure results ===================="
-printf '%-40s %s\n' "SNAT + Maglev off:" "${RESULT[leaf-failure_maglev-off]:-?}"
-printf '%-40s %s\n' "SNAT + Maglev on: " "${RESULT[leaf-failure_maglev-on]:-?}"
+printf '%-40s %s\n' "SNAT + Maglev off:" "${RESULT[snat-leaf-failure_maglev-off]:-?}"
+printf '%-40s %s\n' "SNAT + Maglev on: " "${RESULT[snat-leaf-failure_maglev-on]:-?}"
 echo
 echo "Predicted (M=3 nodes, B=${REPLICAS} backends, 1 leaf fails → ~1/3 re-home):"
 echo "  SNAT + Maglev off: ~22%  (1/3 re-home × 2/3 wrong backend)"

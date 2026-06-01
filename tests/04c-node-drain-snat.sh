@@ -152,16 +152,16 @@ kc -n default rollout status deploy/echo --timeout=120s 2>&1 | sed 's/^/  /'
 
 info "--- SNAT + Maglev OFF ---"
 set_cilium_values "cilium-values-nomaglev.yaml"
-run_cell "node-drain_maglev-off"
+run_cell "snat-node-drain_maglev-off"
 
 info "--- SNAT + Maglev ON ---"
 set_cilium_values "cilium-values-maglev.yaml"
-run_cell "node-drain_maglev-on"
+run_cell "snat-node-drain_maglev-on"
 
 echo
 green "================ Test 4C-SNAT: Node Drain results ======================"
-printf '%-40s %s\n' "SNAT + Maglev off:" "${RESULT[node-drain_maglev-off]:-?}"
-printf '%-40s %s\n' "SNAT + Maglev on: " "${RESULT[node-drain_maglev-on]:-?}"
+printf '%-40s %s\n' "SNAT + Maglev off:" "${RESULT[snat-node-drain_maglev-off]:-?}"
+printf '%-40s %s\n' "SNAT + Maglev on: " "${RESULT[snat-node-drain_maglev-on]:-?}"
 echo
 echo "Drain node: ${DRAIN_NODE}  Grace period: ${GRACE}s  Replicas: ${REPLICAS}"
 echo "Predicted (no CH on leaves, ECMP 3→2 full rehash):"
