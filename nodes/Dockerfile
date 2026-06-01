@@ -38,4 +38,7 @@ RUN curl -fsSL "https://github.com/cilium/pwru/releases/download/${PWRU_VERSION}
     && chmod +x /usr/local/bin/pwru
 
 RUN mkdir -p /etc/bird /run/bird
+
+RUN printf '\nalias kubectl="KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl"\nalias k="KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl"\n' >> /root/.bashrc
+
 CMD ["sleep", "infinity"]

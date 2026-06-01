@@ -201,6 +201,6 @@ printf '%-40s %s\n' "Maglev on  (ETP=Local):" "${RESULT[etp-local_maglev-on]:-?}
 echo
 echo "Predicted: ~33% broken in BOTH cells (1/3 of flows on node2; all break"
 echo "because surviving nodes have different local pods; Maglev is irrelevant)."
-echo "For the config that DOES make Maglev observable: bash tests/04b-dsr.sh"
+echo "For the config that DOES make Maglev observable: bash tests/04b-leaf-failure.sh"
 echo "Raw JSON: ${RESULTS_DIR}/"
 green "Runtime: $(fmt_duration)"

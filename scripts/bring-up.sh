@@ -64,13 +64,16 @@ CLAB_PID=$!
 # Wait for leaf1:eth4/5/6 to appear.  Containerlab creates the node-facing veth pairs
 # (leaf end in container, node end in host ns) then enters the ext-container retry loop.
 # We only need the pairs to exist; we don't need containerlab to move them.
-info "waiting for leaf1 eth4/5/6 (node-facing veth pairs)..."
+info "waiting for leaf1+leaf2 eth4/5/6 (node-facing veth pairs)..."
 deadline=$(( $(date +%s) + 90 ))
 while true; do
   if docker exec clab-maglev-clos-leaf1 ip link show eth4 >/dev/null 2>&1 && \
      docker exec clab-maglev-clos-leaf1 ip link show eth5 >/dev/null 2>&1 && \
-     docker exec clab-maglev-clos-leaf1 ip link show eth6 >/dev/null 2>&1; then
-    green "veth pairs present on leaf1"
+     docker exec clab-maglev-clos-leaf1 ip link show eth6 >/dev/null 2>&1 && \
+     docker exec clab-maglev-clos-leaf2 ip link show eth4 >/dev/null 2>&1 && \
+     docker exec clab-maglev-clos-leaf2 ip link show eth5 >/dev/null 2>&1 && \
+     docker exec clab-maglev-clos-leaf2 ip link show eth6 >/dev/null 2>&1; then
+    green "veth pairs present on leaf1 and leaf2"
     break
   fi
   if [[ $(date +%s) -ge $deadline ]]; then

@@ -110,12 +110,12 @@ elif echo "$SRCIP" | grep -qE '^172\.30\.'; then
   echo
   echo "  Fix: set loadBalancer.mode=dsr in Cilium Helm values."
   echo "  See k8s/cilium-values-dsr-maglev.yaml and k8s/cilium-values-dsr-nomaglev.yaml"
-  echo "  then run: bash tests/04b-dsr.sh"
+  echo "  then run: bash tests/04b-leaf-failure.sh"
 elif echo "$SRCIP" | grep -qE '^203\.0\.113\.'; then
   green "NO SNAT: pod sees ${SRCIP} (original client IP preserved end-to-end)"
   echo "  DSR or masquerade=false mode is active."
   echo "  Maglev CAN now preserve connections across ingress-node changes."
-  echo "  Run bash tests/04b-dsr.sh to measure the 2-cell comparison."
+  echo "  Run bash tests/04b-leaf-failure.sh to measure the 2-cell comparison."
 else
   yellow "Unexpected source IP: ${SRCIP}"
   echo "  Expected 203.0.113.x (client) or 172.30.0.x (SNAT node mgmt IP)"
