@@ -18,7 +18,7 @@
 # before this test to check placement.
 #
 # Env knobs: N=<flows> (default 300)   DUR=<sec> (default 50)
-#            DRAIN_NODE=<k8s-node-name>  (default node1 — change if node1 has many pods)
+#            DRAIN_NODE=<k8s-node-name>  (default node3 — change if node3 has many pods)
 #            GRACE=<seconds>             (default 60 — pod termination grace period)
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -26,9 +26,9 @@ cd "$(dirname "$0")"
 SECONDS=0
 
 N="${N:-300}"; DUR="${DUR:-50}"
-N1="${PFX}-node1"
-DRAIN_NODE="${DRAIN_NODE:-node1}"          # k8s node name (not container name)
-DRAIN_CTR="${PFX}-${DRAIN_NODE}"           # container name
+DRAIN_NODE="${DRAIN_NODE:-node3}"          # k8s node name (not container name)
+DRAIN_CTR="${PFX}-$DRAIN_NODE"             
+MASTER="${PFX}-node1"                      # master node
 GRACE="${GRACE:-60}"                       # termination grace period (must be >> flowgen timeout)
 HELM_VALUES_DIR="/opt/k8s"
 declare -A RESULT
@@ -36,14 +36,14 @@ declare -A RESULT
 set_cilium_values() {
   local vals="$1"
   info "applying ${vals} (helm upgrade + rollout restart)"
-  docker exec -e KUBECONFIG=/etc/rancher/k3s/k3s.yaml "$N1" \
+  docker exec -e KUBECONFIG=/etc/rancher/k3s/k3s.yaml "$MASTER" \
       helm upgrade cilium cilium/cilium -n kube-system \
       -f "${HELM_VALUES_DIR}/${vals}" --reset-values \
       --set loadBalancer.dsrDispatch=opt >/dev/null
   step "triggering rolling restart of cilium DaemonSet"
-  docker exec "$N1" k3s kubectl -n kube-system rollout restart ds/cilium >/dev/null
+  docker exec "$MASTER" k3s kubectl -n kube-system rollout restart ds/cilium >/dev/null
   step "waiting for rollout to complete"
-  docker exec "$N1" k3s kubectl -n kube-system rollout status ds/cilium --timeout=180s 2>&1 | sed 's/^/  /'
+  docker exec "$MASTER" k3s kubectl -n kube-system rollout status ds/cilium --timeout=180s 2>&1 | sed 's/^/  /'
   sleep 5
 }
 
@@ -52,11 +52,11 @@ cleanup() {
   docker exec "$DRAIN_CTR" ip link set fab0 up 2>/dev/null || true
   docker exec "$DRAIN_CTR" ip link set fab1 up 2>/dev/null || true
   kc uncordon "$DRAIN_NODE" 2>/dev/null || true
-  docker exec -e KUBECONFIG=/etc/rancher/k3s/k3s.yaml "$N1" \
+  docker exec -e KUBECONFIG=/etc/rancher/k3s/k3s.yaml "$MASTER" \
       helm upgrade cilium cilium/cilium -n kube-system \
       -f "${HELM_VALUES_DIR}/cilium-values-maglev.yaml" --reset-values >/dev/null 2>&1 || true
-  docker exec "$N1" k3s kubectl -n kube-system rollout restart ds/cilium >/dev/null 2>&1 || true
-  docker exec "$N1" k3s kubectl -n kube-system rollout status ds/cilium --timeout=120s 2>&1 | sed 's/^/  /' || true
+  docker exec "$MASTER" k3s kubectl -n kube-system rollout restart ds/cilium >/dev/null 2>&1 || true
+  docker exec "$MASTER" k3s kubectl -n kube-system rollout status ds/cilium --timeout=120s 2>&1 | sed 's/^/  /' || true
 }
 trap cleanup EXIT
 
@@ -69,7 +69,7 @@ s.settimeout(10)
 try:
     s.connect(('${VIP}', ${VIP_PORT}))
     data = b''
-    while data.count(b'\\n') < 1:
+    while data.count(b'\\n') < 2:
         chunk = s.recv(256)
         if not chunk: break
         data += chunk
@@ -80,18 +80,16 @@ finally:
     s.close()
 "
   RESP=$(echo "$PROBE_PY" | docker exec -i "${CLIENT}" python3 2>/dev/null || true)
-  FIRST=$(echo "$RESP" | head -1 | tr -d '\r')
-  if echo "$FIRST" | grep -qE '^SRCIP='; then
-    SRCIP=$(echo "$FIRST" | cut -d= -f2)
-    if echo "$SRCIP" | grep -qE '^172\.30\.'; then
-      yellow "  WARNING: pod sees ${SRCIP} — DSR may not be active (SNAT masking source)"
-    elif echo "$SRCIP" | grep -qE '^203\.0\.113\.'; then
+  SRCIP_LINE=$(echo "$RESP" | grep '^SRCIP=' | head -1 | tr -d '\r')
+  if [ -n "$SRCIP_LINE" ]; then
+    SRCIP=$(echo "$SRCIP_LINE" | cut -d= -f2)
+    if echo "$SRCIP" | grep -qE '^203\.0\.113\.'; then
       green "  DSR confirmed: pod sees ${SRCIP} (original client IP)"
     else
-      yellow "  pod sees ${SRCIP}"
+      yellow "  WARNING: pod sees ${SRCIP} — DSR may not be active (SNAT masking source)"
     fi
   else
-    yellow "  (SRCIP not in response — run scripts/probe-source-ip.sh for a full check)"
+    yellow "  (SRCIP not in response)"
   fi
 }
 
@@ -196,17 +194,17 @@ kc -n default rollout status deploy/echo --timeout=120s 2>&1 | sed 's/^/  /'
 info "--- DSR + Maglev OFF ---"
 set_cilium_values "cilium-values-dsr-nomaglev.yaml"
 probe_srcip
-run_cell "dsr-drain_maglev-off"
+run_cell "dsr-drain-node_maglev-off"
 
 info "--- DSR + Maglev ON ---"
 set_cilium_values "cilium-values-dsr-maglev.yaml"
 probe_srcip
-run_cell "dsr-drain_maglev-on"
+run_cell "dsr-drain-node_maglev-on"
 
 echo
 green "================ Test 4C: DSR + Node Drain results ====================="
-printf '%-40s %s\n' "DSR + Maglev off:" "${RESULT[dsr-drain_maglev-off]:-?}"
-printf '%-40s %s\n' "DSR + Maglev on: " "${RESULT[dsr-drain_maglev-on]:-?}"
+printf '%-40s %s\n' "DSR + Maglev off:" "${RESULT[dsr-drain-node_maglev-off]:-?}"
+printf '%-40s %s\n' "DSR + Maglev on: " "${RESULT[dsr-drain-node_maglev-on]:-?}"
 echo
 echo "Drain node: ${DRAIN_NODE}  Grace period: ${GRACE}s  Flowgen timeout: 5s"
 echo "Predicted (flows NOT to pods on ${DRAIN_NODE}):"

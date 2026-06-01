@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Test 4B — DSR mode: Maglev observable via spine switch failure (ToR ECMP re-hash).
+# Test 4B — DSR mode: Maglev observable via leaf switch failure (ToR ECMP re-hash).
 #
-# Failure injection: take down all peering links on FAIL_SPINE → ToR loses 1 of 3
+# Failure injection: take down all peering links on FAIL_LEAF → ToR loses 1 of 3
 # ECMP paths → ~1/3 of flows re-home to a different ingress node. All backend pods
 # remain alive throughout. This is the clean signal for Maglev consistency.
 #
@@ -12,7 +12,7 @@
 # the node-drain variant.
 #
 # Env knobs: N=<flows> (default 300)   DUR=<sec> (default 50)
-#            FAIL_SPINE=<container>     (default clab-maglev-clos-spine1)
+#            FAIL_LEAF=<container>     (default clab-maglev-clos-leaf1)
 set -euo pipefail
 cd "$(dirname "$0")"
 . lib/common.sh
@@ -20,7 +20,7 @@ SECONDS=0
 
 N="${N:-300}"; DUR="${DUR:-50}"
 N1="${PFX}-node1"
-FAIL_SPINE="${FAIL_SPINE:-${PFX}-spine2}"
+FAIL_LEAF="${FAIL_LEAF:-${PFX}-leaf1}"
 HELM_VALUES_DIR="/opt/k8s"
 declare -A RESULT
 
@@ -39,8 +39,8 @@ set_cilium_values() {
 }
 
 cleanup() {
-  info "Restoring spine and Cilium values..."
-  docker exec "$FAIL_SPINE" bash -c \
+  info "Restoring leaf and Cilium values..."
+  docker exec "$FAIL_LEAF" bash -c \
     "for i in \$(ip link show | awk -F': ' '/^[0-9]/{print \$2}' | grep -vE '^(lo|eth0)$'); do
        ip link set \$i up 2>/dev/null || true; done" 2>/dev/null || true
   docker exec -e KUBECONFIG=/etc/rancher/k3s/k3s.yaml "$N1" \
@@ -84,22 +84,22 @@ finally:
   fi
 }
 
-fail_spine() {
-  info "failing ${FAIL_SPINE} (all peering interfaces down)"
-  docker exec "$FAIL_SPINE" bash -c \
-    "for i in \$(ip link show | awk -F': ' '/^[0-9]/{print \$2}' | grep -vE '^(lo|eth0)$'); do
+fail_leaf() {
+  info "failing ${FAIL_LEAF} (all peering interfaces down)"
+  docker exec "$FAIL_LEAF" bash -c \
+    "for i in \$(ip link show | awk -F': ' '/^[0-9]/{print \$2}' | grep -vE '^(lo)$' | cut -d@ -f1); do
        ip link set \$i down 2>/dev/null || true; done"
 }
 
-restore_spine() {
-  step "restoring ${FAIL_SPINE} (peering interfaces up)"
-  docker exec "$FAIL_SPINE" bash -c \
-    "for i in \$(ip link show | awk -F': ' '/^[0-9]/{print \$2}' | grep -vE '^(lo|eth0)$'); do
+restore_leaf() {
+  step "restoring ${FAIL_LEAF} (peering interfaces up)"
+  docker exec "$FAIL_LEAF" bash -c \
+    "for i in \$(ip link show | awk -F': ' '/^[0-9]/{print \$2}' | grep -vE '^(lo)$' | cut -d@ -f1); do
        ip link set \$i up 2>/dev/null || true; done"
 }
 
-ensure_spine_up() {
-  restore_spine
+ensure_leaf_up() {
+  restore_leaf
   step "waiting for VIP ECMP to reconverge (≥2 nexthops at leaf1)"
   wait_vip_ecmp 60 || yellow "  INFO: VIP ECMP not fully reconverged — proceeding anyway"
 }
@@ -108,7 +108,7 @@ run_cell() {
   local tag="$1"
   info "=== cell: ${tag} ==="
 
-  ensure_spine_up
+  ensure_leaf_up
 
   step "starting ${N} flows (duration ${DUR}s)"
   docker exec "$CLIENT" rm -f /tmp/${tag}.json /tmp/${tag}.ready 2>/dev/null || true
@@ -127,7 +127,7 @@ run_cell() {
   sleep 3
 
   local failtime; failtime=$(date +%s)
-  fail_spine
+  fail_leaf
 
   local wait_secs=$(( DUR > 20 ? DUR-15 : 10 ))
   for i in $(seq 1 "$wait_secs"); do
@@ -135,7 +135,7 @@ run_cell() {
     [ $(( i % 5 )) -eq 0 ] && step "post-failure wait: ${i}/${wait_secs}s (collecting RSTs)"
   done
 
-  restore_spine
+  restore_leaf
 
   step "collecting results from flowgen"
   for _ in $(seq 1 30); do
@@ -164,27 +164,27 @@ run_cell() {
   green "  cell result: ${broken} broken of ${est} established (${pct}%)"
 }
 
-info "Test 4B setup: N=${N} flows, DUR=${DUR}s, spine failure=${FAIL_SPINE}"
-step "scaling echo to 3 replicas"
-kc -n default scale deploy/echo --replicas=3 >/dev/null 2>&1 || true
+info "Test 4B setup: N=${N} flows, DUR=${DUR}s, leaf failure=${FAIL_LEAF}, 6 replicas"
+step "scaling echo to 6 replicas"
+kc -n default scale deploy/echo --replicas=6 >/dev/null 2>&1 || true
 kc -n default rollout status deploy/echo --timeout=120s 2>&1 | sed 's/^/  /'
 
 info "--- DSR + Maglev OFF ---"
 set_cilium_values "cilium-values-dsr-nomaglev.yaml"
 probe_srcip
-run_cell "dsr_maglev-off"
+run_cell "tor-failure-dsr_maglev-off"
 
 info "--- DSR + Maglev ON ---"
 set_cilium_values "cilium-values-dsr-maglev.yaml"
 probe_srcip
-run_cell "dsr_maglev-on"
+run_cell "tor-failure-dsr_maglev-on"
 
 echo
-green "================ Test 4B: DSR + Spine Failure results =================="
-printf '%-40s %s\n' "DSR + Maglev off:" "${RESULT[dsr_maglev-off]:-?}"
-printf '%-40s %s\n' "DSR + Maglev on: " "${RESULT[dsr_maglev-on]:-?}"
+green "================ Test 4B: DSR + leaf Failure results =================="
+printf '%-40s %s\n' "DSR + Maglev off:" "${RESULT[tor-failure-dsr_maglev-off]:-?}"
+printf '%-40s %s\n' "DSR + Maglev on: " "${RESULT[tor-failure-dsr_maglev-on]:-?}"
 echo
-echo "Predicted (M=3 nodes, B=3 backends, 1 spine of 3 fails → ~1/3 re-home):"
+echo "Predicted (M=3 nodes, B=3 backends, 1 leaf of 3 fails → ~1/3 re-home):"
 echo "  DSR + Maglev off: ~22%  (1/3 re-home × 2/3 wrong backend)"
 echo "  DSR + Maglev on:  ~0%   (Maglev selects same backend; pod has state)"
 echo
