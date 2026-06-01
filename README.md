@@ -74,8 +74,10 @@ make down
 | `tests/01-fabric.sh` | Withdraw spine1's ToR uplink | Fabric is wired correctly; ToR consistent-hashing (CH) moves only ~1/3 of flows (CH on) vs ~2/3 (CH off) when a spine is removed |
 | `tests/02-cilium.sh` | None (read-only probe) | Cilium is in kube-proxy-replacement + native-routing + BPF-masquerade mode; with Maglev, every node selects the **same** backend for a given 5-tuple |
 | `tests/03-failover.sh` | Stop spine1 (ToR ECMP 3→2) | Headline 2×2: `{ToR CH on/off} × {Maglev on/off}` — measures reset % vs prediction `D·((M-1)/M)·((B-1)/B)` |
-| `tests/04b-leaf-failure.sh` | Take down a leaf switch (ECMP re-hash at leaf→node level) | DSR + leaf failure: ~1/3 of flows re-home to a different ingress node; Maglev on → same backend selected → 0% broken; Maglev off → ~22% broken |
-| `tests/04c-node-drain.sh` | `kubectl drain` + fabric links down | DSR + node drain: graceful pod eviction; Maglev re-homes flows to surviving backends; drain grace period >> flowgen socket timeout so 0% broken with Maglev on |
+| `tests/04b-leaf-failure.sh` | Take down a leaf switch | DSR + leaf failure: ~1/3 of flows re-home to a different ingress node; Maglev on → 0% broken; Maglev off → ~22% broken |
+| `tests/04b-leaf-failure-snat.sh` | Take down a leaf switch | SNAT + leaf failure: same failure injection, no DSR; Maglev on → 0%; Maglev off → ~22% |
+| `tests/04c-node-drain.sh` | `kubectl drain` + fabric links down | DSR + node drain: graceful pod eviction; no CH on leaves → ~2/3 re-homed; Maglev on → ~0% broken; Maglev off → ~44-56% |
+| `tests/04c-node-drain-snat.sh` | `kubectl drain` + fabric links down | SNAT + node drain: same failure injection, no DSR; Maglev on → ~0%; Maglev off → ~44-56% |
 
 **What is never done in 04b:** node interface failure, node isolation, or anything that takes a k8s node off the network. Leaf switch failure only.
 

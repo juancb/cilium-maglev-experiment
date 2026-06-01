@@ -72,20 +72,21 @@ def flow_stats(data: dict) -> dict:
     return stats
 
 
-def timeline_data(flows: list, failtime) -> tuple:
-    """Return (times_rel, cumulative_broken, has_failtime) relative to failtime.
+def timeline_data(flows: list, failtime, established: int) -> tuple:
+    """Return (times_rel, cumulative_broken_fraction, has_failtime) relative to failtime.
 
-    Returns non-empty has_failtime even when 0 flows broke, so the caller can
-    still draw the failure marker and a flat-0 line for the cell.
+    y values are in [0, 1] — fraction of established flows broken by time t.
+    Returns has_failtime=True even when 0 flows broke so the caller can still
+    draw the failure marker and a flat-0 line for the cell.
     """
-    if not failtime:
+    if not failtime or not established:
         return [], [], False
     broke_times = sorted(
         f["broke_at"] for f in flows
         if f.get("status") == "broken" and f.get("broke_at") and f.get("established_at")
     )
     rel = [t - failtime for t in broke_times]
-    cum = list(range(1, len(rel) + 1))
+    cum = [i / established for i in range(1, len(rel) + 1)]
     return rel, cum, True
 
 
@@ -120,7 +121,7 @@ def make_timeline_png(stats: dict, out_path: Path):
     all_rel = []
     has_any_failtime = False
     for tag, s in sorted(stats.items()):
-        rel, cum, has_ft = timeline_data(s["flows"], s.get("failtime"))
+        rel, cum, has_ft = timeline_data(s["flows"], s.get("failtime"), s.get("established", 0))
         if has_ft:
             has_any_failtime = True
             all_rel.extend(rel)
@@ -135,20 +136,19 @@ def make_timeline_png(stats: dict, out_path: Path):
 
     plotted = False
     for tag, s in sorted(stats.items()):
-        rel, cum, has_ft = timeline_data(s["flows"], s.get("failtime"))
+        established = s.get("established", 0)
+        rel, cum, has_ft = timeline_data(s["flows"], s.get("failtime"), established)
         if not has_ft:
             continue
         color = colors.get(tag, None)
-        # human-readable label: "single node / ch off / Maglev off"
         label = (tag.replace("_", " / ")
                     .replace("-", " ")
                     .replace("maglev", "Maglev"))
-        established = s.get("established", 0)
-        n_broken = len(cum)
-        suffix = f" — {n_broken}/{established} broken" if established else ""
+        final_frac = cum[-1] if cum else 0.0
+        suffix = f" — {final_frac:.1%}" if established else ""
         # plot step from left window edge; flat at 0 if no breaks
         xs = [x_min] + rel + [x_max]
-        ys = [0]     + cum + [cum[-1] if cum else 0]
+        ys = [0.0]   + cum + [cum[-1] if cum else 0.0]
         ax.step(xs, ys, where="post",
                 label=label + suffix, color=color, linewidth=1.8)
         plotted = True
@@ -160,9 +160,11 @@ def make_timeline_png(stats: dict, out_path: Path):
     ax.axvline(0, color="black", linewidth=1.5, linestyle="--", label="failure (t=0)")
     ax.axvspan(0, 9, alpha=0.08, color="red", label="BGP holdtime (~9s)")
     ax.set_xlim(x_min, x_max)
+    ax.set_ylim(0.0, 1.05)
+    ax.yaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter("%.1f"))
     ax.set_xlabel("Seconds relative to failure")
-    ax.set_ylabel("Cumulative broken flows")
-    ax.set_title("Cilium Maglev × Switch CH — flow breakage timeline")
+    ax.set_ylabel("Fraction of flows broken (eCDF)")
+    ax.set_title("Cilium Maglev × Switch CH — flow breakage eCDF")
     ax.legend(loc="upper left", fontsize=9)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
@@ -230,8 +232,20 @@ EXPECTED = {
     "single-node_ch-on_maglev-off":    28,   # CH at spine doesn't affect leaf-level node selection
     "single-node_ch-off_maglev-on":     0,   # Maglev picks same backend on new agent
     "single-node_ch-on_maglev-on":      0,
+    # Leaf failure (SNAT): ~1/3 re-homed, 2/3 wrong backend
+    "leaf-failure_maglev-off": 22,
+    "leaf-failure_maglev-on":   0,
+    # Leaf failure (DSR): same math, client IP preserved
+    "tor-failure-dsr_maglev-off": 22,
+    "tor-failure-dsr_maglev-on":   0,
+    # Node drain (SNAT): no CH on leaves, ECMP 3→2 full rehash → ~2/3 re-homed
+    "node-drain_maglev-off": 44,
+    "node-drain_maglev-on":   0,
+    # Node drain (DSR): same math
+    "dsr-drain-node_maglev-off": 44,
+    "dsr-drain-node_maglev-on":   0,
     # DSR: client IP preserved; Maglev must match on the new ingress node
-    "dsr_maglev-off":       28,
+    "dsr_maglev-off":       22,
     "dsr_maglev-on":         0,
     # ETP=Local: pod must be local to the ingress node; re-homed flows always lose local pod
     "etp-local_maglev-off": 33,
