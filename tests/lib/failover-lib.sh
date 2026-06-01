@@ -44,9 +44,16 @@ set_cilium_values() {
 }
 
 # ── Disturbed-set (D) capture ────────────────────────────────────────────────
-# Best-effort per-node count of VIP conntrack entries just before failure.
-# This is the empirical distribution of flows across ingress nodes, from which
-# the re-homed fraction D can be derived. Never fails the test.
+# Best-effort per-node count of VIP service-translation conntrack entries just
+# before failure — a DIRECTIONAL indicator of how flows are spread across ingress
+# nodes (the bigger a node's share, the more flows re-home when it/its leaf drops).
+#
+# Caveat: `cilium bpf ct list global` SVC entries are cumulative with a long
+# expiry, so the absolute count includes prior flows — treat the per-node ratios,
+# not the raw numbers, as the signal. Never fails the test (writes {} on error).
+#
+# The k8s node name (node1) differs from the container name (clab-…-node1); we
+# strip the ${PFX}- prefix to match the kubectl -o wide NODE column.
 capture_ingress_dist() {
   local out="$1"
   {
@@ -54,7 +61,7 @@ capture_ingress_dist() {
     local sep=''
     for n in "${NODES[@]}"; do
       local node pod cnt
-      node="$(basename "$n")"
+      node="${n#${PFX}-}"
       pod=$(kc -n kube-system get pods -l k8s-app=cilium -o wide --no-headers 2>/dev/null \
             | awk -v nn="$node" '$7==nn {print $1; exit}')
       cnt=0
