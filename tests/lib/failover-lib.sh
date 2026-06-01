@@ -44,13 +44,14 @@ set_cilium_values() {
 }
 
 # ── Disturbed-set (D) capture ────────────────────────────────────────────────
-# Best-effort per-node count of VIP service-translation conntrack entries just
-# before failure — a DIRECTIONAL indicator of how flows are spread across ingress
-# nodes (the bigger a node's share, the more flows re-home when it/its leaf drops).
+# Per-node count of distinct client source ports ingressing the VIP, read from
+# each agent's Hubble ring buffer — the empirical spread of flows across ingress
+# nodes (the bigger a node's share, the more flows re-home when its leaf drops).
 #
-# Caveat: `cilium bpf ct list global` SVC entries are cumulative with a long
-# expiry, so the absolute count includes prior flows — treat the per-node ratios,
-# not the raw numbers, as the signal. Never fails the test (writes {} on error).
+# This replaces a full `cilium bpf ct list global` dump (multi-second, thousands
+# of entries) with `hubble observe --last N` (~0.4s, reads the in-memory ring).
+# It is also launched in the BACKGROUND from run_cell so it can never delay
+# failure injection. Never fails the test (writes {} on error).
 #
 # The k8s node name (node1) differs from the container name (clab-…-node1); we
 # strip the ${PFX}- prefix to match the kubectl -o wide NODE column.
@@ -66,9 +67,10 @@ capture_ingress_dist() {
             | awk -v nn="$node" '$7==nn {print $1; exit}')
       cnt=0
       if [ -n "$pod" ]; then
+        # each agent's Hubble sees only its own node's flows → per-node ingress load
         cnt=$(kc -n kube-system exec "$pod" -c cilium-agent -- \
-              cilium bpf ct list global 2>/dev/null \
-              | grep -c "${VIP}:${VIP_PORT}" || echo 0)
+              hubble observe --last 2000 --to-port "${VIP_PORT}" --verdict FORWARDED -o jsonpb 2>/dev/null \
+              | python3 "${REPO_ROOT}/scripts/hubble-count-ports.py" 2>/dev/null || echo 0)
       fi
       printf '%s"%s":%s' "$sep" "$node" "${cnt:-0}"
       sep=','
@@ -102,8 +104,9 @@ run_cell() {
       sleep 1; elapsed=$(( elapsed + 1 ))
       [ $(( elapsed % 5 )) -eq 0 ] && step "waiting for flows to establish... (${elapsed}s)"
     done
-    step "flows established; capturing ingress distribution (disturbed-set D)"
-    capture_ingress_dist "${RESULTS_DIR}/${rtag}.dist.json"
+    step "flows established; capturing ingress distribution via Hubble (background)"
+    capture_ingress_dist "${RESULTS_DIR}/${rtag}.dist.json" &
+    local dist_pid=$!
     step "sleeping 3s before failure injection"
     sleep 3
 
@@ -117,6 +120,7 @@ run_cell() {
     done
 
     restore_failure
+    wait "$dist_pid" 2>/dev/null || true   # ensure dist file is written before aggregation
 
     step "collecting run ${run} results"
     for _ in $(seq 1 30); do
