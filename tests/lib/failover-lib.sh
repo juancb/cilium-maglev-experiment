@@ -67,12 +67,17 @@ capture_ingress_dist() {
             | awk -v nn="$node" '$7==nn {print $1; exit}')
       cnt=0
       if [ -n "$pod" ]; then
-        # each agent's Hubble sees only its own node's flows → per-node ingress load
-        cnt=$(kc -n kube-system exec "$pod" -c cilium-agent -- \
+        # each agent's Hubble sees only its own node's flows → per-node ingress load.
+        # NOTE: no `|| echo 0` here — under `set -o pipefail` a failed exec would then
+        # double-print ("0\n0") and corrupt the JSON. Capture raw, then sanitize to one int.
+        local raw
+        raw=$(kc -n kube-system exec "$pod" -c cilium-agent -- \
               hubble observe --last 2000 --to-port "${VIP_PORT}" --verdict FORWARDED -o jsonpb 2>/dev/null \
-              | python3 "${REPO_ROOT}/scripts/hubble-count-ports.py" 2>/dev/null || echo 0)
+              | python3 "${REPO_ROOT}/scripts/hubble-count-ports.py" 2>/dev/null) || true
+        cnt=$(printf '%s\n' "$raw" | grep -oE '^[0-9]+$' | head -1)
+        [ -n "$cnt" ] || cnt=0
       fi
-      printf '%s"%s":%s' "$sep" "$node" "${cnt:-0}"
+      printf '%s"%s":%s' "$sep" "$node" "${cnt}"
       sep=','
     done
     printf '}\n'
@@ -170,12 +175,22 @@ run_cell() {
     done
     docker cp "${CLIENT}:/tmp/${rtag}.json" "${RESULTS_DIR}/${rtag}.json" >/dev/null 2>&1 || true
     if command -v jq >/dev/null 2>&1 && [ -s "${RESULTS_DIR}/${rtag}.json" ]; then
+      # ALWAYS set failtime first (analysis depends on it) — independent of the dist
+      # capture, which is best-effort and must never be able to drop failtime.
       local tmp; tmp=$(mktemp)
-      jq --argjson ft "$failtime" \
-         --slurpfile dist "${RESULTS_DIR}/${rtag}.dist.json" \
-         '.summary.failtime = $ft | .summary.ingress_dist = $dist[0]' \
+      jq --argjson ft "$failtime" '.summary.failtime = $ft' \
          "${RESULTS_DIR}/${rtag}.json" > "$tmp" \
         && mv "$tmp" "${RESULTS_DIR}/${rtag}.json" || rm -f "$tmp"
+      # then attach the ingress distribution only if it parsed as valid JSON
+      if jq -e . "${RESULTS_DIR}/${rtag}.dist.json" >/dev/null 2>&1; then
+        tmp=$(mktemp)
+        jq --slurpfile dist "${RESULTS_DIR}/${rtag}.dist.json" \
+           '.summary.ingress_dist = $dist[0]' \
+           "${RESULTS_DIR}/${rtag}.json" > "$tmp" \
+          && mv "$tmp" "${RESULTS_DIR}/${rtag}.json" || rm -f "$tmp"
+      else
+        yellow "  INFO: ${rtag}.dist.json not valid JSON — skipping ingress_dist (failtime kept)"
+      fi
     fi
 
     if [ "$CAPTURE_PCAP" = "1" ]; then
