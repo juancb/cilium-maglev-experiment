@@ -1,0 +1,38 @@
+# Two LoadBalancer VIPs over the SAME echo backends, differing only in the
+# Cilium per-Service load-balancing algorithm annotation. Used by
+# tests/04-maglev-paired.sh for a paired maglev-vs-random comparison under one
+# failure event — no Cilium restart needed to switch algorithms.
+#
+# Requires bpf.lbAlgorithmAnnotation=true in the Cilium values (already enabled).
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-mag
+  namespace: default
+  labels: { app: echo, paired: "true" }
+  annotations:
+    service.cilium.io/lb-algorithm: maglev
+spec:
+  type: LoadBalancer
+  loadBalancerIP: 192.0.2.11
+  externalTrafficPolicy: Cluster
+  selector: { app: echo }
+  ports:
+    - { name: tcp, port: 8080, targetPort: 8080, protocol: TCP }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-rnd
+  namespace: default
+  labels: { app: echo, paired: "true" }
+  annotations:
+    service.cilium.io/lb-algorithm: random
+spec:
+  type: LoadBalancer
+  loadBalancerIP: 192.0.2.12
+  externalTrafficPolicy: Cluster
+  selector: { app: echo }
+  ports:
+    - { name: tcp, port: 8080, targetPort: 8080, protocol: TCP }
