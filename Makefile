@@ -22,8 +22,7 @@ else
 endif
 
 .PHONY: help images up down redeploy test test-fabric test-cilium \
-        test-leaf-failure test-leaf-failure-snat test-node-drain \
-        test-node-drain-snat test-graceful-drain status
+        test-maglev status
 
 help:
 	@echo "Targets (run from Git Bash on Windows or from WSL root):"
@@ -33,12 +32,8 @@ help:
 	@echo "  redeploy            down + up"
 	@echo "  test-fabric         Test 1 — fabric + consistent hashing"
 	@echo "  test-cilium         Test 2 — Cilium mode + cross-node backend consistency"
-	@echo "  test-leaf-failure       Test 4B  — DSR  + leaf switch failure (RUNS-averaged)"
-	@echo "  test-leaf-failure-snat  Test 4B  — SNAT + leaf switch failure"
-	@echo "  test-node-drain         Test 4C  — DSR  + node drain + fabric cut"
-	@echo "  test-node-drain-snat    Test 4C  — SNAT + node drain + fabric cut"
-	@echo "  test-graceful-drain     Test 4D  — pure re-homing (backends moved off first)"
-	@echo "  status                  containerlab inspect"
+	@echo "  test-maglev         Maglev paired test — two VIPs (maglev vs random), node drain"
+	@echo "  status              containerlab inspect"
 
 images:
 	$(_R) $(_DIR)/scripts/build-images.sh
@@ -53,7 +48,7 @@ down:
 
 redeploy: down up
 
-test: test-fabric test-cilium test-leaf-failure
+test: test-fabric test-cilium test-maglev
 
 test-fabric:
 	$(_R) $(_DIR)/tests/01-fabric.sh
@@ -61,20 +56,8 @@ test-fabric:
 test-cilium:
 	$(_R) $(_DIR)/tests/02-cilium.sh
 
-test-leaf-failure:
-	$(_R) $(_DIR)/tests/04b-leaf-failure.sh
-
-test-leaf-failure-snat:
-	$(_R) $(_DIR)/tests/04b-leaf-failure-snat.sh
-
-test-node-drain:
-	$(_R) $(_DIR)/tests/04c-node-drain.sh
-
-test-node-drain-snat:
-	$(_R) $(_DIR)/tests/04c-node-drain-snat.sh
-
-test-graceful-drain:
-	$(_R) $(_DIR)/tests/04d-graceful-drain.sh
+test-maglev:
+	$(_R) $(_DIR)/tests/04-maglev-paired.sh
 
 status:
 	MSYS_NO_PATHCONV=1 wsl -d Ubuntu-24.04 -u root -- \

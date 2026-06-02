@@ -60,11 +60,9 @@ SONiC↔Arista↔SAI consistent-hashing mapping: [docs/APPENDIX-A-arista-mapping
 
 ```bash
 make up              # deploy topology, bring up k3s+Cilium(maglev) on each node, apply demo app
-make test-fabric     # Test 1: BGP up, ECMP present, per-flow (not per-packet) hash, ToR CH on vs off
-make test-cilium       # Test 2: kpr/native/masq on; cross-node backend matrix consistent under maglev
-make test-leaf-failure # Test 4B: leaf switch failure, Maglev on vs off (RUNS-averaged)
-make test-node-drain   # Test 4C: node drain + fabric cut
-make test-graceful-drain # Test 4D: pure re-homing (backends moved off the drained node first)
+make test-fabric   # Test 1: BGP up, ECMP present, per-flow (not per-packet) hash
+make test-cilium   # Test 2: kpr/native/masq on; cross-node backend matrix consistent under maglev
+make test-maglev   # Maglev paired test: two VIPs (maglev vs random), node drain, per-flow re-homing
 make down
 ```
 
@@ -72,26 +70,19 @@ make down
 
 | Script | Failure injection | What it proves |
 |--------|------------------|----------------|
-| `tests/01-fabric.sh` | Withdraw spine1's ToR uplink | Fabric is wired correctly; ToR consistent-hashing (CH) moves only ~1/3 of flows (CH on) vs ~2/3 (CH off) when a spine is removed |
-| `tests/02-cilium.sh` | None (read-only probe) | Cilium is in kube-proxy-replacement + native-routing + BPF-masquerade mode; with Maglev, every node selects the **same** backend for a given 5-tuple |
-| `tests/04b-leaf-failure.sh` | Take down a leaf switch | DSR + leaf failure: ~1/3 of flows re-home to a different ingress node; Maglev on → 0% broken; Maglev off → ~22% broken |
-| `tests/04b-leaf-failure-snat.sh` | Take down a leaf switch | SNAT + leaf failure: same failure injection, no DSR; Maglev on → 0%; Maglev off → ~22% |
-| `tests/04c-node-drain.sh` | `kubectl drain` + fabric links down | DSR + node drain: graceful pod eviction; no CH on leaves → ~2/3 re-homed; Maglev on → ~0% broken; Maglev off → ~44-56% |
-| `tests/04c-node-drain-snat.sh` | `kubectl drain` + fabric links down | SNAT + node drain: same failure injection, no DSR; Maglev on → ~0%; Maglev off → ~44-56% |
+| `tests/01-fabric.sh` | Withdraw spine1's ToR uplink | Fabric is wired correctly; ECMP is per-flow (not per-packet) |
+| `tests/02-cilium.sh` | None (read-only probe) | Cilium is in kube-proxy-replacement + native-routing + BPF-masquerade mode |
+| `tests/04-maglev-paired.sh` | `kubectl drain` a worker node (removes it from the VIP ECMP set) | Two VIPs over the **same** backends — one annotated `lb-algorithm=maglev`, one `random` — measured under **one** failure. Re-homed flows survive on the maglev VIP and break on the random VIP, proving Maglev keeps the backend across an ingress-node change. |
 
-**What is never done in 04b:** node interface failure, node isolation, or anything that takes a k8s node off the network. Leaf switch failure only.
+**Why the paired design:** switching Maglev on/off per-Service via `service.cilium.io/lb-algorithm`
+(enabled by `bpf.lbAlgorithmAnnotation`) needs **no Cilium restart**, so both VIPs run
+simultaneously over an identical fabric/ECMP state — a true paired comparison with no
+rollout-convergence artifact and no run-to-run variance.
 
-## What each test proves
-
-- **Test 1 (`tests/01-fabric.sh`)** — fabric is wired correctly *and* consistent hashing works:
-  shutting spine1's ToR link moves only ~1/3 of flows with CH on, ~2/3 with CH off. The
-  measured disturbed-set `D` feeds Test 3's prediction.
-- **Test 2 (`tests/02-cilium.sh`)** — Cilium is in the required mode and, with Maglev, every
-  node selects the **same** backend for a given 5-tuple (the mechanism that lets a re-homed
-  flow survive).
-- **Tests 4B/4C/4D** — open `N` long-lived TCP flows, inject a failure (leaf switch / node
-  drain / graceful drain), repeat `RUNS` times, and report broken% as mean ± stddev for
-  Maglev on vs off. See the per-test header comments for the exact failure injection.
+**Earlier single-knob tests (leaf-failure, node-drain DSR/SNAT variants) were removed** once we
+found that (a) hard leaf failure resets flows in place rather than re-homing them, and (b)
+switching the algorithm via `helm upgrade + rollout restart` injected a convergence artifact that
+dominated the results. See git history for those scripts.
 
 ## Caveats
 
