@@ -79,6 +79,44 @@ capture_ingress_dist() {
   } > "$out" 2>/dev/null || echo '{}' > "$out"
 }
 
+# ── Per-flow re-homing capture (CAPTURE_PCAP=1) ──────────────────────────────
+# Run tcpdump inside each node container, filtered to the client→VIP traffic, so
+# we can later tell which node ingressed each flow before vs after the failure
+# (scripts/analyze-rehoming.py). Low volume (one client IP, ~300 flows) so this
+# is cheap. No-op unless CAPTURE_PCAP=1.
+CAPTURE_PCAP="${CAPTURE_PCAP:-0}"
+
+pcap_start() {
+  local rtag="$1"
+  [ "$CAPTURE_PCAP" = "1" ] || return 0
+  local n node
+  for n in "${NODES[@]}"; do
+    node="${n#${PFX}-}"
+    docker exec "$n" pkill -f "tcpdump.*${VIP}" 2>/dev/null || true
+    docker exec -d "$n" tcpdump -i any -p -w "/tmp/${rtag}.${node}.pcap" \
+      "host 203.0.113.1 and tcp port ${VIP_PORT}" 2>/dev/null || \
+      yellow "  WARN: tcpdump failed to start on ${node}"
+  done
+  sleep 1  # let captures attach before flows start
+}
+
+pcap_stop_collect() {
+  local rtag="$1"
+  [ "$CAPTURE_PCAP" = "1" ] || return 0
+  local n node
+  for n in "${NODES[@]}"; do
+    node="${n#${PFX}-}"
+    docker exec "$n" pkill -f "tcpdump.*${VIP}" 2>/dev/null || true
+    sleep 1  # let tcpdump flush its buffer to disk
+    # Decode on the node (tcpdump guaranteed present) to text: "<unixts> ... src.port > dst.port"
+    # so the host-side analyzer needs no pcap library. Keep the raw pcap as the artifact.
+    docker exec "$n" tcpdump -nn -tt -r "/tmp/${rtag}.${node}.pcap" \
+      "src 203.0.113.1 and dst port ${VIP_PORT}" \
+      > "${RESULTS_DIR}/${rtag}.${node}.txt" 2>/dev/null || true
+    docker cp "${n}:/tmp/${rtag}.${node}.pcap" "${RESULTS_DIR}/${rtag}.${node}.pcap" 2>/dev/null || true
+  done
+}
+
 # ── One cell = RUNS repetitions, then aggregate ──────────────────────────────
 run_cell() {
   local tag="$1"
@@ -90,6 +128,9 @@ run_cell() {
     step "--- ${tag}: run ${run}/${RUNS} ---"
 
     ensure_healthy
+
+    [ "$CAPTURE_PCAP" = "1" ] && step "starting per-node pcap capture (CAPTURE_PCAP=1)"
+    pcap_start "$rtag"
 
     step "starting ${N} flows (duration ${DUR}s)"
     docker exec "$CLIENT" rm -f /tmp/${rtag}.json /tmp/${rtag}.ready 2>/dev/null || true
@@ -121,6 +162,7 @@ run_cell() {
 
     restore_failure
     wait "$dist_pid" 2>/dev/null || true   # ensure dist file is written before aggregation
+    pcap_stop_collect "$rtag"
 
     step "collecting run ${run} results"
     for _ in $(seq 1 30); do
@@ -134,6 +176,11 @@ run_cell() {
          '.summary.failtime = $ft | .summary.ingress_dist = $dist[0]' \
          "${RESULTS_DIR}/${rtag}.json" > "$tmp" \
         && mv "$tmp" "${RESULTS_DIR}/${rtag}.json" || rm -f "$tmp"
+    fi
+
+    if [ "$CAPTURE_PCAP" = "1" ]; then
+      step "analyzing per-flow re-homing from pcaps"
+      python3 "${REPO_ROOT}/scripts/analyze-rehoming.py" "${RESULTS_DIR}" "${rtag}" 2>&1 | sed 's/^/  /' || true
     fi
   done
 
