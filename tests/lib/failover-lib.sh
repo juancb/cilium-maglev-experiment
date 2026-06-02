@@ -90,6 +90,11 @@ capture_ingress_dist() {
 # (scripts/analyze-rehoming.py). Low volume (one client IP, ~300 flows) so this
 # is cheap. No-op unless CAPTURE_PCAP=1.
 CAPTURE_PCAP="${CAPTURE_PCAP:-0}"
+SRC_IP="${SRC_IP:-203.0.113.1}"   # flowgen --src; appears in the tcpdump filter
+# kill pattern MUST match the tcpdump command line (which contains SRC_IP, NOT the
+# VIP) — otherwise stale captures are never killed and run1's pcap accumulates
+# every later run's traffic.
+PCAP_KILL="tcpdump.*${SRC_IP}"
 
 pcap_start() {
   local rtag="$1"
@@ -97,9 +102,10 @@ pcap_start() {
   local n node
   for n in "${NODES[@]}"; do
     node="${n#${PFX}-}"
-    docker exec "$n" pkill -f "tcpdump.*${VIP}" 2>/dev/null || true
+    docker exec "$n" pkill -f "$PCAP_KILL" 2>/dev/null || true
+    docker exec "$n" rm -f "/tmp/${rtag}.${node}.pcap" 2>/dev/null || true
     docker exec -d "$n" tcpdump -i any -p -w "/tmp/${rtag}.${node}.pcap" \
-      "host 203.0.113.1 and tcp port ${VIP_PORT}" 2>/dev/null || \
+      "host ${SRC_IP} and tcp port ${VIP_PORT}" 2>/dev/null || \
       yellow "  WARN: tcpdump failed to start on ${node}"
   done
   sleep 1  # let captures attach before flows start
@@ -111,12 +117,12 @@ pcap_stop_collect() {
   local n node
   for n in "${NODES[@]}"; do
     node="${n#${PFX}-}"
-    docker exec "$n" pkill -f "tcpdump.*${VIP}" 2>/dev/null || true
+    docker exec "$n" pkill -f "$PCAP_KILL" 2>/dev/null || true
     sleep 1  # let tcpdump flush its buffer to disk
     # Decode on the node (tcpdump guaranteed present) to text: "<unixts> ... src.port > dst.port"
     # so the host-side analyzer needs no pcap library. Keep the raw pcap as the artifact.
     docker exec "$n" tcpdump -nn -tt -r "/tmp/${rtag}.${node}.pcap" \
-      "src 203.0.113.1 and dst port ${VIP_PORT}" \
+      "src ${SRC_IP} and dst port ${VIP_PORT}" \
       > "${RESULTS_DIR}/${rtag}.${node}.txt" 2>/dev/null || true
     docker cp "${n}:/tmp/${rtag}.${node}.pcap" "${RESULTS_DIR}/${rtag}.${node}.pcap" 2>/dev/null || true
   done
@@ -126,6 +132,14 @@ pcap_stop_collect() {
 run_cell() {
   local tag="$1"
   info "=== cell: ${tag} (${RUNS} run(s)) ==="
+
+  # Clear stale per-run artifacts for this tag so a shorter RUNS= doesn't inherit
+  # run files from a previous longer run (which would skew the aggregate).
+  rm -f "${RESULTS_DIR}/${tag}.run"*.json \
+        "${RESULTS_DIR}/${tag}.run"*.dist.json \
+        "${RESULTS_DIR}/${tag}.run"*.rehoming.json \
+        "${RESULTS_DIR}/${tag}.run"*.txt \
+        "${RESULTS_DIR}/${tag}.run"*.pcap 2>/dev/null || true
 
   local run
   for run in $(seq 1 "$RUNS"); do
