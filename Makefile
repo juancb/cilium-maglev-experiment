@@ -32,7 +32,7 @@ help:
 	@echo "  redeploy            down + up"
 	@echo "  test-fabric         Test 1 — fabric + consistent hashing"
 	@echo "  test-cilium         Test 2 — Cilium mode + cross-node backend consistency"
-	@echo "  test-maglev         Maglev paired test — two VIPs (maglev vs random), node drain"
+	@echo "  test-maglev         Maglev paired test — 2x2 {maglev,random}x{dsr,snat}, one node-drain failure"
 	@echo "  status              containerlab inspect"
 
 images:
@@ -57,7 +57,7 @@ test-cilium:
 	$(_R) $(_DIR)/tests/02-cilium.sh
 
 test-maglev:
-	$(_R) $(_DIR)/tests/04-maglev-paired.sh
+	$(_R) $(_DIR)/tests/04-maglev-matrix.sh
 
 status:
 	MSYS_NO_PATHCONV=1 wsl -d Ubuntu-24.04 -u root -- \

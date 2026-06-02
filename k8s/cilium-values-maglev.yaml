@@ -37,6 +37,7 @@ ipam:
 loadBalancer:
   algorithm: maglev                # cluster DEFAULT backend-selection algorithm
   mode: snat                       # cluster DEFAULT forwarding mode
+  dsrDispatch: opt                 # dispatch for services annotated forwarding-mode=dsr
 maglev:
   tableSize: 16381
   # MUST be identical on every agent for cross-node backend consistency.

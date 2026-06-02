@@ -1,0 +1,70 @@
+# Four LoadBalancer VIPs over the SAME echo backends — the full 2x2 of
+# {maglev,random} x {dsr,snat}, selected purely by per-Service Cilium annotations
+# (no cluster config change, no restart). Used by tests/04-maglev-matrix.sh to
+# measure all four arms under ONE shared failure event.
+#
+# Requires bpf.lbAlgorithmAnnotation + bpf.lbModeAnnotation + loadBalancer.dsrDispatch=opt.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-mag-dsr
+  namespace: default
+  labels: { app: echo, matrix: "true" }
+  annotations:
+    service.cilium.io/lb-algorithm: maglev
+    service.cilium.io/forwarding-mode: dsr
+spec:
+  type: LoadBalancer
+  loadBalancerIP: 192.0.2.11
+  externalTrafficPolicy: Cluster
+  selector: { app: echo }
+  ports: [{ name: tcp, port: 8080, targetPort: 8080, protocol: TCP }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-rnd-dsr
+  namespace: default
+  labels: { app: echo, matrix: "true" }
+  annotations:
+    service.cilium.io/lb-algorithm: random
+    service.cilium.io/forwarding-mode: dsr
+spec:
+  type: LoadBalancer
+  loadBalancerIP: 192.0.2.12
+  externalTrafficPolicy: Cluster
+  selector: { app: echo }
+  ports: [{ name: tcp, port: 8080, targetPort: 8080, protocol: TCP }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-mag-snat
+  namespace: default
+  labels: { app: echo, matrix: "true" }
+  annotations:
+    service.cilium.io/lb-algorithm: maglev
+    service.cilium.io/forwarding-mode: snat
+spec:
+  type: LoadBalancer
+  loadBalancerIP: 192.0.2.13
+  externalTrafficPolicy: Cluster
+  selector: { app: echo }
+  ports: [{ name: tcp, port: 8080, targetPort: 8080, protocol: TCP }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-rnd-snat
+  namespace: default
+  labels: { app: echo, matrix: "true" }
+  annotations:
+    service.cilium.io/lb-algorithm: random
+    service.cilium.io/forwarding-mode: snat
+spec:
+  type: LoadBalancer
+  loadBalancerIP: 192.0.2.14
+  externalTrafficPolicy: Cluster
+  selector: { app: echo }
+  ports: [{ name: tcp, port: 8080, targetPort: 8080, protocol: TCP }]
