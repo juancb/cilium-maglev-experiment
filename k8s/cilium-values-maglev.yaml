@@ -18,6 +18,8 @@ endpointRoutes:
 
 bpf:
   masquerade: true
+  lbAlgorithmAnnotation: true      # per-Service service.cilium.io/lb-algorithm (maglev|random)
+  lbModeAnnotation: true           # per-Service service.cilium.io/forwarding-mode (dsr|snat)
 
 socketLB:
   hostNamespaceOnly: true
@@ -33,8 +35,8 @@ ipam:
 
 # ---- the knob under test -----------------------------------------------------------------
 loadBalancer:
-  algorithm: maglev                # consistent hashing for backend selection
-  mode: snat
+  algorithm: maglev                # cluster DEFAULT backend-selection algorithm
+  mode: snat                       # cluster DEFAULT forwarding mode
 maglev:
   tableSize: 16381
   # MUST be identical on every agent for cross-node backend consistency.
