@@ -192,6 +192,45 @@ run_cell() {
   RESULT["$tag"]="${agg##*: }"
 }
 
+# ── Stabilization gate ───────────────────────────────────────────────────────
+# After a Cilium restart, `rollout status` only means pods are Running — not that
+# BGP has reconverged, Maglev tables are rebuilt, and the dataplane is settled.
+# Measuring too early gave a ~66% "run1" breakage that had nothing to do with the
+# failure under test. Gate on: all agents 1/1, BGP Established on every node, VIP
+# ECMP present, AND an empirical warm-up flowburst that must survive with NO
+# failure injected. Only then is it safe to measure.
+WARMUP_N="${WARMUP_N:-60}"; WARMUP_DUR="${WARMUP_DUR:-12}"
+wait_stable() {
+  step "stabilizing: waiting for agents 1/1, BGP Established, VIP ECMP"
+  wait_cilium_ready 60 || yellow "  INFO: agents not all 1/1"
+  local n
+  for n in "${NODES[@]}"; do
+    wait_node_bgp "$n" 60 || yellow "  INFO: BGP not Established on $(basename "$n")"
+  done
+  wait_vip_ecmp 60 || yellow "  INFO: VIP ECMP not converged"
+
+  local attempt broke est thr
+  for attempt in 1 2 3 4 5; do
+    step "warm-up probe ${attempt}/5: ${WARMUP_N} flows, NO failure (must survive)"
+    docker exec "$CLIENT" rm -f /tmp/_warmup.json /tmp/_warmup.ready 2>/dev/null || true
+    docker exec -d "$CLIENT" python3 /opt/flowgen/flowgen.py \
+        --vip "$VIP" --port "$VIP_PORT" --count "$WARMUP_N" --duration "$WARMUP_DUR" \
+        --src 203.0.113.1 --out /tmp/_warmup.json --ready-file /tmp/_warmup.ready
+    sleep $(( WARMUP_DUR + 5 ))
+    docker cp "${CLIENT}:/tmp/_warmup.json" "${RESULTS_DIR}/_warmup.json" >/dev/null 2>&1 || true
+    broke=$(jq '.summary.broken_after_establish' "${RESULTS_DIR}/_warmup.json" 2>/dev/null || echo 999)
+    est=$(jq '.summary.established' "${RESULTS_DIR}/_warmup.json" 2>/dev/null || echo 0)
+    thr=$(( est / 50 + 1 ))   # tolerate ≤ ~2%
+    if [ "${est:-0}" -gt 0 ] && [ "${broke:-999}" -le "$thr" ]; then
+      green "  warm-up clean: ${broke}/${est} broke with no failure — dataplane stable"
+      return 0
+    fi
+    yellow "  warm-up dirty: ${broke}/${est} broke with NO failure — Cilium still settling; wait 15s"
+    sleep 15
+  done
+  yellow "  WARNING: never reached a clean warm-up; proceeding (results may include settling noise)"
+}
+
 # ── Cleanup trap (wrapper sets the trap to call this) ────────────────────────
 failover_cleanup() {
   info "Restoring failure state and Cilium values..."
@@ -212,10 +251,12 @@ failover_main() {
 
   info "--- Maglev OFF ---"
   set_cilium_values "$VALS_OFF"
+  wait_stable
   run_cell "$TAG_OFF"
 
   info "--- Maglev ON ---"
   set_cilium_values "$VALS_ON"
+  wait_stable
   run_cell "$TAG_ON"
 
   echo
