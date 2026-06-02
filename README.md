@@ -61,9 +61,10 @@ SONiC↔Arista↔SAI consistent-hashing mapping: [docs/APPENDIX-A-arista-mapping
 ```bash
 make up              # deploy topology, bring up k3s+Cilium(maglev) on each node, apply demo app
 make test-fabric     # Test 1: BGP up, ECMP present, per-flow (not per-packet) hash, ToR CH on vs off
-make test-cilium     # Test 2: kpr/native/masq on; cross-node backend matrix consistent under maglev
-make test-failover   # Test 3: the 2×2 — N flows, stop spine1, count resets per cell
-make sweep           # vary B (and M) → results/sweep.csv + plot vs. predicted curve
+make test-cilium       # Test 2: kpr/native/masq on; cross-node backend matrix consistent under maglev
+make test-leaf-failure # Test 4B: leaf switch failure, Maglev on vs off (RUNS-averaged)
+make test-node-drain   # Test 4C: node drain + fabric cut
+make test-graceful-drain # Test 4D: pure re-homing (backends moved off the drained node first)
 make down
 ```
 
@@ -73,7 +74,6 @@ make down
 |--------|------------------|----------------|
 | `tests/01-fabric.sh` | Withdraw spine1's ToR uplink | Fabric is wired correctly; ToR consistent-hashing (CH) moves only ~1/3 of flows (CH on) vs ~2/3 (CH off) when a spine is removed |
 | `tests/02-cilium.sh` | None (read-only probe) | Cilium is in kube-proxy-replacement + native-routing + BPF-masquerade mode; with Maglev, every node selects the **same** backend for a given 5-tuple |
-| `tests/03-failover.sh` | Stop spine1 (ToR ECMP 3→2) | Headline 2×2: `{ToR CH on/off} × {Maglev on/off}` — measures reset % vs prediction `D·((M-1)/M)·((B-1)/B)` |
 | `tests/04b-leaf-failure.sh` | Take down a leaf switch | DSR + leaf failure: ~1/3 of flows re-home to a different ingress node; Maglev on → 0% broken; Maglev off → ~22% broken |
 | `tests/04b-leaf-failure-snat.sh` | Take down a leaf switch | SNAT + leaf failure: same failure injection, no DSR; Maglev on → 0%; Maglev off → ~22% |
 | `tests/04c-node-drain.sh` | `kubectl drain` + fabric links down | DSR + node drain: graceful pod eviction; no CH on leaves → ~2/3 re-homed; Maglev on → ~0% broken; Maglev off → ~44-56% |
@@ -89,15 +89,15 @@ make down
 - **Test 2 (`tests/02-cilium.sh`)** — Cilium is in the required mode and, with Maglev, every
   node selects the **same** backend for a given 5-tuple (the mechanism that lets a re-homed
   flow survive).
-- **Test 3 (`tests/03-failover.sh`)** — the headline: open `N` long-lived TCP flows, stop
-  spine1, count resets in each of the four `{CH}×{Maglev}` cells, compare to
-  `D·((M-1)/M)·((B-1)/B)`.
+- **Tests 4B/4C/4D** — open `N` long-lived TCP flows, inject a failure (leaf switch / node
+  drain / graceful drain), repeat `RUNS` times, and report broken% as mean ± stddev for
+  Maglev on vs off. See the per-test header comments for the exact failure injection.
 
 ## Caveats
 
 - **sonic-vs dataplane fidelity** is the top risk: the virtual ASIC may *accept* the
   fine-grained/consistent-hashing config without honoring it in forwarding. `make test-fabric`
-  gates this. If it fails, set `EMULATE_CH=1` (see `tests/03-failover.sh`) to reproduce the
+  gates this. If it fails, set `EMULATE_CH=1` to reproduce the
   CH-on vs CH-off disturbed sets via scripted next-hop withdrawals so the Maglev comparison
   still runs; Appendix A asserts the real-hardware behavior.
 - **Cilium→bird at 127.0.0.1** uses `ebgpMultihop: 2`. If the session won't establish, the

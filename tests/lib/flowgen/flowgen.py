@@ -3,9 +3,10 @@
 flowgen — open N long-lived TCP flows to the Service VIP, learn which backend serves each,
 hold them open with app-level keepalives, and record exactly when each flow breaks.
 
-Used by tests/03-failover.sh: start flowgen, let flows establish, fail a spine, then measure
-how many flows reset. With Maglev a re-homed flow keeps its backend (survives); without it the
-new ingress node picks a different backend and the flow resets.
+Used by the failover tests (tests/04*.sh via tests/lib/failover-lib.sh): start flowgen, let
+flows establish, inject a failure, then measure how many flows reset. With Maglev a re-homed
+flow keeps its backend (survives); without it the new ingress node picks a different backend
+and the flow resets.
 
 Output: a JSON file (--out) with per-flow {srcport, backend, status, established_at, broke_at}
 and a summary block. Exit code is always 0; the test script interprets the JSON.
