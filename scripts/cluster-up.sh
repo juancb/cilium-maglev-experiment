@@ -43,11 +43,11 @@ for _ in $(seq 1 90); do
 done
 kc get nodes -o wide || true
 
-info "installing Cilium (maglev variant)"
+info "installing Cilium ${CILIUM_VERSION} (maglev variant)"
 helm1 repo add cilium https://helm.cilium.io >/dev/null 2>&1 || true
 helm1 repo update >/dev/null
 helm1 install cilium cilium/cilium -n kube-system --create-namespace \
-    -f /opt/k8s/cilium-values-maglev.yaml
+    --version "${CILIUM_VERSION}" -f /opt/k8s/cilium-values-maglev.yaml
 docker exec -e KUBECONFIG="$KCFG" "${PFX}-node1" cilium status --wait --wait-duration 3m || true
 
 info "applying BGP config + demo app"

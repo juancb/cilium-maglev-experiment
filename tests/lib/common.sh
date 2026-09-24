@@ -12,6 +12,10 @@ LEAVES=("${PFX}-leaf1" "${PFX}-leaf2")
 NODES=("${PFX}-node1" "${PFX}-node2" "${PFX}-node3")
 CLIENT="${PFX}-client"
 
+# Cilium chart version for EVERY helm install/upgrade in the lab. An unpinned
+# `helm upgrade` silently moves the cluster to the repo's newest chart.
+CILIUM_VERSION="${CILIUM_VERSION:-1.19.1}"
+
 VIP="192.0.2.10"
 VIP_PORT="8080"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

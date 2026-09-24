@@ -34,7 +34,7 @@ set_cilium_values() {
   [ "$DSR" = "1" ] && dsr_args=(--set loadBalancer.dsrDispatch=opt)
   info "applying ${vals} (helm upgrade + rollout restart)"
   docker exec -e KUBECONFIG=/etc/rancher/k3s/k3s.yaml "$HELM_NODE" \
-      helm upgrade cilium cilium/cilium -n kube-system \
+      helm upgrade cilium cilium/cilium -n kube-system --version "${CILIUM_VERSION}" \
       -f "${HELM_VALUES_DIR}/${vals}" --reset-values "${dsr_args[@]}" >/dev/null
   step "triggering rolling restart of cilium DaemonSet"
   docker exec "$HELM_NODE" k3s kubectl -n kube-system rollout restart ds/cilium >/dev/null
@@ -265,7 +265,7 @@ failover_cleanup() {
   info "Restoring failure state and Cilium values..."
   restore_failure 2>/dev/null || true
   docker exec -e KUBECONFIG=/etc/rancher/k3s/k3s.yaml "$HELM_NODE" \
-      helm upgrade cilium cilium/cilium -n kube-system \
+      helm upgrade cilium cilium/cilium -n kube-system --version "${CILIUM_VERSION}" \
       -f "${HELM_VALUES_DIR}/cilium-values-maglev.yaml" --reset-values >/dev/null 2>&1 || true
   docker exec "$HELM_NODE" k3s kubectl -n kube-system rollout restart ds/cilium >/dev/null 2>&1 || true
   docker exec "$HELM_NODE" k3s kubectl -n kube-system rollout status ds/cilium --timeout=300s 2>&1 | sed 's/^/  /' || true
