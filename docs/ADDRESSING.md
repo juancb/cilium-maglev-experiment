@@ -55,6 +55,8 @@ old value and update all references.
 | Name                    | Value             | Notes                                   |
 |-------------------------|-------------------|-----------------------------------------|
 | Service VIP (shared)    | 192.0.2.10/32     | LoadBalancer IP, advertised by all nodes|
+| Test 5 VIP (Cilium)     | 192.0.2.20/32     | advertised only by Cilium BGP (honors eTP=Local) |
+| Test 5 VIP (static)     | 192.0.2.21/32     | also static in bird: survives Cilium BGP loss |
 | node1/2/3 `public` /32  | 198.51.100.1/2/3  | per-node "public" interface             |
 | node1/2/3 `k8s` /32     | 10.10.0.1/2/3     | Kubernetes InternalIP                   |
 | node1/2/3 pod CIDR      | 10.244.1/2/3.0/24 | native routing, cluster-pool per node   |

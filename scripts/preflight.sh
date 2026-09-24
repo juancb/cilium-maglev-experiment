@@ -16,6 +16,9 @@ done < <(find tests scripts nodes/startup fabric/tor -name '*.sh' | sort)
 
 echo "== python =="
 python3 -m py_compile tests/lib/flowgen/flowgen.py 2>/dev/null && pass "flowgen.py" || err "flowgen.py"
+for p in tests/lib/flowgen/connprobe.py scripts/disruption-summary.py; do
+  python3 -m py_compile "$p" 2>/dev/null && pass "$p" || err "$p"
+done
 
 echo "== JSON =="
 python3 -m json.tool fabric/tor/config_db.json >/dev/null 2>&1 && pass "config_db.json" || err "config_db.json"

@@ -1,0 +1,46 @@
+# Services + in-cluster client for tests/05-cilium-disruption.sh.
+#
+# Two LoadBalancer VIPs over the SAME echo backends, differing only in who originates the
+# route into the fabric:
+#   192.0.2.20  echo-dz-cil     advertised ONLY by Cilium BGP. Honors eTP=Local (a node
+#                               advertises it only while it has a local ready backend) and
+#                               is withdrawn from a node whenever its agent's BGP session
+#                               drops (no graceful restart).
+#   192.0.2.21  echo-dz-static  ALSO statically originated by bird (nodes/bird/*.conf), so
+#                               it stays in the fabric whatever Cilium does. This is the
+#                               "BGP unharmed" control: any breakage here is datapath only.
+#
+# externalTrafficPolicy / internalTrafficPolicy are patched per cell by the test. The
+# flowgen-ic pod is the in-cluster client (iTP only affects in-cluster traffic, so an
+# external client can't see it); the test pins it to TARGET_NODE and loads flowgen from a
+# ConfigMap it creates.
+#
+# Uses the echo Deployment from k8s/demo-app.yaml.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-dz-cil
+  namespace: default
+  labels: { app: echo, disruption: "true" }
+spec:
+  type: LoadBalancer
+  loadBalancerIP: 192.0.2.20
+  externalTrafficPolicy: Cluster
+  internalTrafficPolicy: Cluster
+  selector: { app: echo }
+  ports: [{ name: tcp, port: 8080, targetPort: 8080, protocol: TCP }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-dz-static
+  namespace: default
+  labels: { app: echo, disruption: "true" }
+spec:
+  type: LoadBalancer
+  loadBalancerIP: 192.0.2.21
+  externalTrafficPolicy: Cluster
+  internalTrafficPolicy: Cluster
+  selector: { app: echo }
+  ports: [{ name: tcp, port: 8080, targetPort: 8080, protocol: TCP }]

@@ -24,13 +24,14 @@ kind: CiliumBGPPeerConfig
 metadata:
   name: bird-peer
 spec:
+  # Mirrors prod: 90s hold, no BFD, and graceful restart left at the Cilium default
+  # (disabled). Without GR, an agent restart closes the session and bird withdraws every
+  # route Cilium originated (pod CIDR, Cilium-only VIPs) until the new agent re-peers.
+  # tests/05-cilium-disruption.sh measures exactly that window.
   timers:
     connectRetryTimeSeconds: 1
-    holdTimeSeconds: 9
-    keepAliveTimeSeconds: 3
-  gracefulRestart:
-    enabled: true
-    restartTimeSeconds: 30
+    holdTimeSeconds: 90
+    keepAliveTimeSeconds: 30
   transport:
     peerPort: 179
   families:

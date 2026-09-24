@@ -11,7 +11,7 @@ Virtual leaf-spine lab measuring the impact of Cilium **Maglev** consistent hash
   sudo, so containerlab must run as root.
 - **Prefix every Bash-tool command with `MSYS_NO_PATHCONV=1`** or `/mnt/c/...` paths get
   mangled. Don't inline multi-line scripts through the wsl bridge — run script *files*.
-- Repo at `/mnt/c/Users/Juan/Documents/Development/cilium-maglev-experiment`. Container names:
+- Repo at `/mnt/g/Documents/Development/cilium-maglev-experiment` (G:\Documents\Development\...). Container names:
   `clab-maglev-clos-<node>`. Validate artifacts anytime with `bash scripts/preflight.sh`.
 
 ## Docker setup

@@ -22,7 +22,7 @@ else
 endif
 
 .PHONY: help images up down redeploy test test-fabric test-cilium \
-        test-maglev status
+        test-maglev test-disruption verify-bgp apply-bgp status
 
 help:
 	@echo "Targets (run from Git Bash on Windows or from WSL root):"
@@ -33,6 +33,10 @@ help:
 	@echo "  test-fabric         Test 1 — fabric + consistent hashing"
 	@echo "  test-cilium         Test 2 — Cilium mode + cross-node backend consistency"
 	@echo "  test-maglev         Maglev paired test — 2x2 {maglev,random}x{dsr,snat}, one node-drain failure"
+	@echo "  test-disruption     Test 5 — Cilium agent restart/kill + backend kill, maglev on/off, eTP/iTP"
+	@echo "                      (env: ALGOS MODES POLICIES DISRUPTIONS TARGET_NODE UPGRADE_TO RUNS ...)"
+	@echo "  verify-bgp          show negotiated hold timers + GR state of every node BGP session"
+	@echo "  apply-bgp           push BGP timer config into a running lab (resets sessions once)"
 	@echo "  status              containerlab inspect"
 
 images:
@@ -58,6 +62,21 @@ test-cilium:
 
 test-maglev:
 	$(_R) $(_DIR)/tests/04-maglev-matrix.sh
+
+# Test 5 env knobs (ALGOS, POLICIES, DISRUPTIONS, ...) must cross the wsl.exe boundary:
+# WSLENV only forwards listed variables, so pass them explicitly with env.
+DZ_VARS := ALGOS MODES POLICIES DISRUPTIONS TARGET_NODE IC_NODE KILL_COUNT UPGRADE_TO \
+           CILIUM_VERSION N RUNS REPLICAS PROBE_HZ DUR_ROLLOUT DUR_KILL SETTLE STRICT_BGP
+DZ_ENV  := $(foreach v,$(DZ_VARS),$(if $($(v)),$(v)='$($(v))'))
+
+test-disruption:
+	$(if $(_R),$(_R) -c "env $(DZ_ENV) bash $(_DIR)/tests/05-cilium-disruption.sh",bash $(_DIR)/tests/05-cilium-disruption.sh)
+
+verify-bgp:
+	$(_R) $(_DIR)/tests/lib/bgp-verify.sh
+
+apply-bgp:
+	$(_R) $(_DIR)/scripts/apply-bgp-config.sh
 
 status:
 	MSYS_NO_PATHCONV=1 wsl -d Ubuntu-24.04 -u root -- \

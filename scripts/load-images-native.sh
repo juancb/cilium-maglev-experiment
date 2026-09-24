@@ -3,7 +3,7 @@
 # The sonic-vs tarball is at /root/docker-sonic-vs.gz from scripts/fetch-sonic.sh.
 # FRR is pulled from registry. Node/client images are rebuilt from source.
 set -uo pipefail
-REPO="/mnt/c/Users/Juan/Documents/Development/cilium-maglev-experiment"
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo "== docker-sonic-vs from tarball =="
 if docker image inspect docker-sonic-vs:latest &>/dev/null; then

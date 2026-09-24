@@ -63,6 +63,8 @@ make up              # deploy topology, bring up k3s+Cilium(maglev) on each node
 make test-fabric   # Test 1: BGP up, ECMP present, per-flow (not per-packet) hash
 make test-cilium   # Test 2: kpr/native/masq on; cross-node backend matrix consistent under maglev
 make test-maglev   # Maglev paired test: two VIPs (maglev vs random), node drain, per-flow re-homing
+make verify-bgp    # negotiated hold timers + GR state on every node BGP session (expect hold 90)
+make test-disruption   # Test 5: Cilium agent restart / kill, backend kill, maglev on/off, eTP/iTP
 make down
 ```
 
@@ -73,6 +75,40 @@ make down
 | `tests/01-fabric.sh` | Withdraw spine1's ToR uplink | Fabric is wired correctly; ECMP is per-flow (not per-packet) |
 | `tests/02-cilium.sh` | None (read-only probe) | Cilium is in kube-proxy-replacement + native-routing + BPF-masquerade mode |
 | `tests/04-maglev-paired.sh` | `kubectl drain` a worker node (removes it from the VIP ECMP set) | Two VIPs over the **same** backends — one annotated `lb-algorithm=maglev`, one `random` — measured under **one** failure. Re-homed flows survive on the maglev VIP and break on the random VIP, proving Maglev keeps the backend across an ingress-node change. |
+
+| `tests/05-cilium-disruption.sh` | Cilium-side only, fabric stays up: rolling agent restart, real version upgrade from the pinned 1.19.1 to the newest 1.19.x (`UPGRADE_TO`), SIGKILL of one agent (OOM), SIGKILL of backend pod(s) (app OOM) | How much Cilium itself disrupts established flows and new connections, per {maglev, random} x {SNAT, DSR} x {eTP, iTP} Cluster/Local. See "Test 5" below. |
+
+### Test 5 — Cilium disruption
+
+Three client populations run through each disruption at once:
+
+- **ext-cil**: external client to `192.0.2.20`, advertised only by Cilium BGP.
+- **ext-static**: external client to `192.0.2.21`, which bird also originates statically. This
+  is the "BGP unharmed" control: breakage here comes from the datapath, not routing.
+- **int**: a pod on `IC_NODE` connecting to the ClusterIP. `internalTrafficPolicy` only affects
+  in-cluster traffic, and `externalTrafficPolicy` only affects external traffic to
+  LoadBalancer/NodePort. That's why the default toggles them together
+  (`POLICIES="Cluster:Cluster Local:Local"`) instead of crossing them.
+
+Each population also runs a new-connection prober, and leaf1's routes for both VIPs and every
+pod CIDR are sampled every second. `scripts/disruption-summary.py` ranks the cells from least
+to most disruptive by **collateral** broken flows (it excludes flows whose backend was killed
+on purpose) and writes `results/disruption-summary.{md,json}`.
+
+```bash
+make test-disruption                                    # full default matrix
+ALGOS=maglev DISRUPTIONS=agent-kill RUNS=1 make test-disruption
+POLICIES="Local:Cluster Cluster:Local" MODES="snat dsr" make test-disruption
+DISRUPTIONS=agent-upgrade make test-disruption        # 1.19.1 -> newest 1.19.x (resolved from the helm repo)
+UPGRADE_TO=1.19.5 DISRUPTIONS=agent-upgrade make test-disruption
+KILL_COUNT=all DISRUPTIONS=backend-kill make test-disruption   # the node loses every local backend
+```
+
+BGP mirrors prod: hold 90 s / keepalive 30 s on node↔leaf and bird↔Cilium, no BFD, and no
+explicit graceful restart (defaults: bird "aware", FRR helper, Cilium disabled). Without GR,
+an agent restart closes the bird↔Cilium session, so the node's pod CIDR and any Cilium-only VIP
+leave the fabric until the new agent re-peers. The route timeline measures that window. To
+push the timer config into a running lab, run `make apply-bgp`.
 
 **Why the paired design:** switching Maglev on/off per-Service via `service.cilium.io/lb-algorithm`
 (enabled by `bpf.lbAlgorithmAnnotation`) needs **no Cilium restart**, so both VIPs run

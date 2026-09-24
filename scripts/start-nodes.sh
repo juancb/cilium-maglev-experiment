@@ -5,7 +5,7 @@
 set -uo pipefail
 LAB="maglev-clos"
 NET="maglev-mgmt"
-REPO="/mnt/c/Users/Juan/Documents/Development/cilium-maglev-experiment"
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Ensure management network exists
 docker network create "$NET" --subnet 172.30.0.0/24 2>/dev/null || true
