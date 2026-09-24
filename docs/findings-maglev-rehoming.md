@@ -4,6 +4,16 @@ Status as of the clean-lab run (2026-06-02). This captures what is **empirically
 proven** versus **theorised**. It deliberately does **not** modify
 `maglev-production-case.md`, whose SNAT-mode claim remains unverified (see below).
 
+> **Update 2026-09-24** (see `findings-cilium-disruption.md`):
+> - These runs used `fib_multipath_hash_policy=1`, which in this single-kernel lab
+>   re-hashes a flow to a different ECMP member on every TCP retransmission timeout.
+>   Flows that retransmitted during a failure could have re-homed spuriously. The fabric
+>   now uses policy 3. The DSR headline (Maglev keeps re-homed flows alive) was
+>   re-confirmed under policy 3: DSR+Maglev 0% vs DSR+random 7.5% vs SNAT ~24%.
+> - The **SNAT question below is now answered**: in Test 5, `.20` flows re-homed in every
+>   mode, and SNAT broke them equally with Maglev (24.8%) and random (23.8%). Maglev
+>   doesn't help under SNAT.
+
 ## Method (what makes these numbers trustworthy)
 
 - **Failure injection — graceful node drain (`tests/04d-graceful-drain.sh`):** cordon
