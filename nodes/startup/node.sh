@@ -30,10 +30,20 @@ ip link set public up
 ip link set k8s up
 
 echo "[node${ID}] sysctls: per-flow L4 ECMP + forwarding + rp_filter off"
-sysctl -w net.ipv4.fib_multipath_hash_policy=1
+# policy 3 = header 5-tuple; policy 1 would reuse the socket's tx hash (see set-ecmp-l4-hash.sh)
+sysctl -w net.ipv4.fib_multipath_hash_fields=0x0037
+sysctl -w net.ipv4.fib_multipath_hash_policy=3
 sysctl -w net.ipv4.ip_forward=1
 sysctl -w net.ipv4.conf.all.rp_filter=0
 sysctl -w net.ipv4.conf.default.rp_filter=0
+
+# The container's default route is the docker mgmt network. Without this, traffic for a pod
+# CIDR that has been withdrawn from the fabric (e.g. while that node's Cilium agent restarts
+# without graceful restart) leaks out eth0 to the WSL host instead of being dropped like a
+# real fabric would drop it. bird's per-node /24s are more specific, so this only catches
+# the gap.
+echo "[node${ID}] blackhole the pod supernet as a last resort"
+ip route replace blackhole 10.244.0.0/16 metric 4000
 
 echo "[node${ID}] cgroupv2: clear subtree_control so k3s can create kubepods hierarchy"
 # cgroupv2 propagates domain controllers to child cgroups via subtree_control. If the root

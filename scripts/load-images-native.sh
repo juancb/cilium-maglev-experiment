@@ -3,6 +3,10 @@
 # The sonic-vs tarball is at /root/docker-sonic-vs.gz from scripts/fetch-sonic.sh.
 # FRR is pulled from registry. Node/client images are rebuilt from source.
 set -uo pipefail
+
+# The lab runs on the native Docker CE daemon (scripts/install-native-docker.sh), which
+# listens on docker-native.sock because Docker Desktop's WSL proxy owns docker.sock.
+[ -S /var/run/docker-native.sock ] && export DOCKER_HOST="${DOCKER_HOST:-unix:///var/run/docker-native.sock}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo "== docker-sonic-vs from tarball =="

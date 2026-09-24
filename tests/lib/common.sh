@@ -2,6 +2,10 @@
 # Shared helpers for the test scripts. Source this: . "$(dirname "$0")/lib/common.sh"
 set -euo pipefail
 
+# The lab runs on the native Docker CE daemon (scripts/install-native-docker.sh), which
+# listens on docker-native.sock because Docker Desktop's WSL proxy owns docker.sock.
+[ -S /var/run/docker-native.sock ] && export DOCKER_HOST="${DOCKER_HOST:-unix:///var/run/docker-native.sock}"
+
 LAB="maglev-clos"
 PFX="clab-${LAB}"
 

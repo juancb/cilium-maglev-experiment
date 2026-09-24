@@ -3,6 +3,10 @@
 # tools + images are present, before a (slow) `make up`. Safe to run anywhere with bash+python3.
 #   bash scripts/preflight.sh
 set -uo pipefail
+
+# The lab runs on the native Docker CE daemon (scripts/install-native-docker.sh), which
+# listens on docker-native.sock because Docker Desktop's WSL proxy owns docker.sock.
+[ -S /var/run/docker-native.sock ] && export DOCKER_HOST="${DOCKER_HOST:-unix:///var/run/docker-native.sock}"
 cd "$(dirname "$0")/.."
 fail=0
 pass(){ printf '  \033[32mOK\033[0m   %s\n' "$*"; }

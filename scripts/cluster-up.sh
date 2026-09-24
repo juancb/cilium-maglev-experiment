@@ -50,6 +50,17 @@ helm1 install cilium cilium/cilium -n kube-system --create-namespace \
     --version "${CILIUM_VERSION}" -f /opt/k8s/cilium-values-maglev.yaml
 docker exec -e KUBECONFIG="$KCFG" "${PFX}-node1" cilium status --wait --wait-duration 3m || true
 
+# The operator registers the BGP/LB-IPAM CRDs; on a cold image cache that can take longer
+# than `cilium status --wait`, and applying cilium-bgp.yaml before then fails the script.
+info "waiting for Cilium BGP CRDs"
+for _ in $(seq 1 120); do
+  kc get crd ciliumbgpclusterconfigs.cilium.io ciliumloadbalancerippools.cilium.io >/dev/null 2>&1 && break
+  sleep 5
+done
+kc wait --for condition=established --timeout=120s \
+  crd/ciliumbgpclusterconfigs.cilium.io crd/ciliumbgppeerconfigs.cilium.io \
+  crd/ciliumbgpadvertisements.cilium.io crd/ciliumloadbalancerippools.cilium.io
+
 info "applying BGP config + demo app"
 kc apply -f /opt/k8s/cilium-bgp.yaml
 kc apply -f /opt/k8s/demo-app.yaml
