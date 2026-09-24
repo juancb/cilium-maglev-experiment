@@ -21,7 +21,7 @@ def now():
 
 class Flow:
     __slots__ = ("idx", "sock", "srcport", "backend", "status",
-                 "established_at", "broke_at", "error_type")
+                 "established_at", "broke_at", "error_type", "max_stall", "stall_at")
     def __init__(self, idx):
         self.idx = idx
         self.sock = None
@@ -31,6 +31,8 @@ class Flow:
         self.established_at = None
         self.broke_at = None
         self.error_type = None       # reset | timeout | peer_closed | other
+        self.max_stall = 0.0         # longest keepalive round trip (s): a survived outage shows here
+        self.stall_at = None         # when that longest round trip started
 
 
 def classify_error(exc):
@@ -54,7 +56,7 @@ def classify_error(exc):
         return "peer_closed"
     return "other"
 
-def run_flow(flow, vip, port, src, stop_at, lock):
+def run_flow(flow, vip, port, src, stop_at, lock, io_timeout=5.0):
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -73,6 +75,10 @@ def run_flow(flow, vip, port, src, stop_at, lock):
         line = greeting.split(b"\n", 1)[0].decode(errors="replace")
         flow.backend = line.split("=", 1)[1] if "=" in line else line
         flow.sock = s
+        # io_timeout bounds how long a stalled flow may wait before we call it broken. The
+        # 5s default counts a >5s stall as broken; a real TCP client would keep retransmitting,
+        # so disruption tests pass a longer one and read the stall from max_stall instead.
+        s.settimeout(io_timeout)
         with lock:
             flow.status = "established"
             flow.established_at = now()
@@ -86,10 +92,14 @@ def run_flow(flow, vip, port, src, stop_at, lock):
     # hold open with a keepalive byte each second; a reset/blackhole trips send or recv
     while now() < stop_at:
         try:
+            sent = now()
             s.sendall(b".")
             echo = s.recv(16)
             if not echo:
                 raise ConnectionError("peer closed")
+            rtt = now() - sent
+            if rtt > flow.max_stall:
+                flow.max_stall, flow.stall_at = rtt, sent
         except Exception as exc:
             with lock:
                 flow.status = "broken"
@@ -116,6 +126,8 @@ def main():
                     help="touch this path once all flows are established (signals the harness)")
     ap.add_argument("--src", default=None,
                     help="source IP to bind before connect (e.g. 203.0.113.1)")
+    ap.add_argument("--timeout", type=float, default=5.0,
+                    help="seconds an established flow may stall before it counts as broken")
     args = ap.parse_args()
 
     lock = threading.Lock()
@@ -123,7 +135,7 @@ def main():
     stop_at = now() + args.duration
     threads = []
     for f in flows:
-        t = threading.Thread(target=run_flow, args=(f, args.vip, args.port, args.src, stop_at, lock),
+        t = threading.Thread(target=run_flow, args=(f, args.vip, args.port, args.src, stop_at, lock, args.timeout),
                              daemon=True)
         t.start()
         threads.append(t)
@@ -148,7 +160,8 @@ def main():
     with lock:
         records = [{"idx": f.idx, "srcport": f.srcport, "backend": f.backend,
                     "status": f.status, "established_at": f.established_at,
-                    "broke_at": f.broke_at, "error_type": f.error_type} for f in flows]
+                    "broke_at": f.broke_at, "error_type": f.error_type,
+                    "max_stall": round(f.max_stall, 4), "stall_at": f.stall_at} for f in flows]
     broken = [r for r in records if r["status"] == "broken" and r["established_at"]]
     never  = [r for r in records if r["status"] == "broken" and not r["established_at"]]
     survived = [r for r in records if r["status"] in ("closed", "established")]

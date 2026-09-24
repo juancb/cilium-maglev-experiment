@@ -39,6 +39,9 @@
 #   CILIUM_VERSION (1.19.1)  UPGRADE_TO (latest = newest patch of CILIUM_VERSION's minor)
 #   N (200 flows per population)  RUNS (2)  REPLICAS (6)  PROBE_HZ (10)
 #   DUR_ROLLOUT (200)  DUR_KILL (75)  SETTLE (15)  STRICT_BGP (0)
+#   FLOW_TIMEOUT (30): seconds a flow may stall before it counts as broken. A real TCP
+#     client keeps retransmitting through a short outage, so a stall is reported
+#     separately (max_stall) rather than as a break.
 set -euo pipefail
 cd "$(dirname "$0")"
 . lib/common.sh
@@ -55,6 +58,7 @@ IC_NODE="${IC_NODE:-$TARGET_NODE}"
 KILL_COUNT="${KILL_COUNT:-1}"
 N="${N:-200}"; RUNS="${RUNS:-2}"; REPLICAS="${REPLICAS:-6}"; PROBE_HZ="${PROBE_HZ:-10}"
 DUR_ROLLOUT="${DUR_ROLLOUT:-200}"; DUR_KILL="${DUR_KILL:-75}"; SETTLE="${SETTLE:-15}"
+FLOW_TIMEOUT="${FLOW_TIMEOUT:-30}"
 STRICT_BGP="${STRICT_BGP:-0}"
 BASE_VALUES="cilium-values-maglev.yaml"
 VIP_CIL="192.0.2.20"; VIP_STATIC="192.0.2.21"
@@ -122,8 +126,8 @@ cilium_pod_on() {
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
 }
 
-# bird spawns cilium1, cilium2, ... from "neighbor range"; count the Established ones
-cilium_sessions() { docker exec "$1" birdc show protocols 2>/dev/null | awk '$1 ~ /^cilium[0-9]+$/ && /Established/' | grep -c . || true; }
+# bird spawns dynbgp1, dynbgp2, ... from "neighbor range"; count the Established ones
+cilium_sessions() { docker exec "$1" birdc show protocols 2>/dev/null | awk '$1 ~ /^(dynbgp|cilium)[0-9]+$/ && /Established/' | grep -c . || true; }
 
 wait_cilium_session() {  # node-ctr secs
   local i
@@ -220,22 +224,30 @@ bgp_watch() {  # out stopfile
     pcs+=("$(kc get ciliumnode "$n" -o jsonpath='{.spec.ipam.podCIDRs[0]}' 2>/dev/null)")
   done
   : > "$out"
+  local tmp; tmp=$(mktemp -d)
   while [ ! -f "$stopf" ]; do
     local ts routes s1 s2 s3
     ts=$(date +%s.%N)
-    routes=$(docker exec "${LEAVES[0]}" vtysh \
-               -c "show ip route ${VIP_CIL}/32" -c "show ip route ${VIP_STATIC}/32" \
-               -c "show ip route ${pcs[0]}" -c "show ip route ${pcs[1]}" -c "show ip route ${pcs[2]}" 2>/dev/null \
-             | awk -v a="${VIP_CIL}/32" -v b="${VIP_STATIC}/32" -v p1="${pcs[0]}" -v p2="${pcs[1]}" -v p3="${pcs[2]}" '
+    # the four probes run in parallel, so a sample costs one docker exec of latency, not four
+    docker exec "${LEAVES[0]}" vtysh \
+        -c "show ip route ${VIP_CIL}/32" -c "show ip route ${VIP_STATIC}/32" \
+        -c "show ip route ${pcs[0]}" -c "show ip route ${pcs[1]}" -c "show ip route ${pcs[2]}" \
+        > "$tmp/routes" 2>/dev/null &
+    cilium_sessions "${NODES[0]}" > "$tmp/s1" &
+    cilium_sessions "${NODES[1]}" > "$tmp/s2" &
+    cilium_sessions "${NODES[2]}" > "$tmp/s3" &
+    wait
+    routes=$(awk -v a="${VIP_CIL}/32" -v b="${VIP_STATIC}/32" -v p1="${pcs[0]}" -v p2="${pcs[1]}" -v p3="${pcs[2]}" '
                  /^Routing entry for/ {p=$4}
                  /^[[:space:]]+\* 10\./ {c[p]++}
-                 END {printf "%d,%d,%d,%d,%d", c[a], c[b], c[p1], c[p2], c[p3]}')
-    s1=$(cilium_sessions "${NODES[0]}"); s2=$(cilium_sessions "${NODES[1]}"); s3=$(cilium_sessions "${NODES[2]}")
+                 END {printf "%d,%d,%d,%d,%d", c[a], c[b], c[p1], c[p2], c[p3]}' "$tmp/routes")
+    s1=$(cat "$tmp/s1"); s2=$(cat "$tmp/s2"); s3=$(cat "$tmp/s3")
     IFS=, read -r r1 r2 r3 r4 r5 <<<"$routes"
     printf '{"t":%s,"vip_cil":%s,"vip_static":%s,"podcidr":{"node1":%s,"node2":%s,"node3":%s},"cilium_sess":{"node1":%s,"node2":%s,"node3":%s}}\n' \
       "$ts" "${r1:-0}" "${r2:-0}" "${r3:-0}" "${r4:-0}" "${r5:-0}" "${s1:-0}" "${s2:-0}" "${s3:-0}" >> "$out"
-    sleep 1
+    sleep 0.25
   done
+  rm -rf "$tmp"
 }
 
 # ── Disruptions (each blocks until Cilium/the backend has recovered) ────────
@@ -320,15 +332,15 @@ start_clients() {  # rtag dur
   docker exec "$CLIENT" sh -c "rm -f /tmp/${r}.*" 2>/dev/null || true
   kc -n default exec flowgen-ic -- sh -c "rm -f /tmp/${r}.*" 2>/dev/null || true
   docker exec -d "$CLIENT" python3 /opt/flowgen/flowgen.py --vip "$VIP_CIL" --port "$VIP_PORT" \
-    --count "$N" --duration "$d" --src "$SRC" --out "/tmp/${r}.ext-cil.json" --ready-file "/tmp/${r}.ext-cil.ready"
+    --count "$N" --duration "$d" --timeout "$FLOW_TIMEOUT" --src "$SRC" --out "/tmp/${r}.ext-cil.json" --ready-file "/tmp/${r}.ext-cil.ready"
   docker exec -d "$CLIENT" python3 /opt/flowgen/flowgen.py --vip "$VIP_STATIC" --port "$VIP_PORT" \
-    --count "$N" --duration "$d" --src "$SRC" --out "/tmp/${r}.ext-static.json" --ready-file "/tmp/${r}.ext-static.ready"
+    --count "$N" --duration "$d" --timeout "$FLOW_TIMEOUT" --src "$SRC" --out "/tmp/${r}.ext-static.json" --ready-file "/tmp/${r}.ext-static.ready"
   docker exec -d "$CLIENT" python3 /opt/flowgen/connprobe.py --vip "$VIP_CIL" --port "$VIP_PORT" \
     --hz "$PROBE_HZ" --duration "$d" --src "$SRC" --out "/tmp/${r}.probe-ext-cil.json"
   docker exec -d "$CLIENT" python3 /opt/flowgen/connprobe.py --vip "$VIP_STATIC" --port "$VIP_PORT" \
     --hz "$PROBE_HZ" --duration "$d" --src "$SRC" --out "/tmp/${r}.probe-ext-static.json"
   kc -n default exec flowgen-ic -- sh -c "nohup python3 /opt/flowgen/flowgen.py --vip ${CLUSTER_IP} --port ${VIP_PORT} \
-    --count ${N} --duration ${d} --out /tmp/${r}.int.json --ready-file /tmp/${r}.int.ready >/tmp/${r}.int.log 2>&1 &"
+    --count ${N} --duration ${d} --timeout ${FLOW_TIMEOUT} --out /tmp/${r}.int.json --ready-file /tmp/${r}.int.ready >/tmp/${r}.int.log 2>&1 &"
   kc -n default exec flowgen-ic -- sh -c "nohup python3 /opt/flowgen/connprobe.py --vip ${CLUSTER_IP} --port ${VIP_PORT} \
     --hz ${PROBE_HZ} --duration ${d} --out /tmp/${r}.probe-int.json >/tmp/${r}.probe-int.log 2>&1 &"
 }
@@ -398,7 +410,7 @@ run_once() {  # cell run disruption etp itp
 {"cell":"${cell}","run":${run},"disruption":"${d}","algo":"${CUR_ALGO}","mode":"${CUR_MODE}",
  "etp":"${etp}","itp":"${itp}","target_node":"${TARGET_NODE}","ic_node":"${IC_NODE}",
  "kill_count":"${KILL_COUNT}","cilium_version":"${CILIUM_VERSION}","upgrade_to":"${UPGRADE_TO}",
- "t0":${t0},"failtime":${failtime},"endtime":${endtime},"settle":${SETTLE},"dur":${dur},
+ "t0":${t0},"failtime":${failtime},"endtime":${endtime},"settle":${SETTLE},"dur":${dur},"flow_timeout":${FLOW_TIMEOUT},
  "truncated":${truncated},"killed":${killed_json}}
 EOF
   after_run "$d"

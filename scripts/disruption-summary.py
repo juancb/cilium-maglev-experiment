@@ -11,6 +11,8 @@ traffic population (ext-cil, ext-static, int) it reports, as mean ± stddev over
   newconn%     new-connection attempts that failed between disruption start and the end of
                the settle window (connprobe)
   outage s     longest run of consecutive failed new connections
+  stalled%     flows that SURVIVED but stalled >= 1s after the disruption started (a real
+               client would see a hiccup, not an error); stall s = the longest such stall
 plus, from the leaf1 route timeline: seconds any node's pod CIDR was missing from the
 fabric, seconds the Cilium-only VIP had fewer nexthops than before, and seconds any
 bird<->Cilium session was down.
@@ -60,6 +62,10 @@ def flow_stats(data, failtime, killed):
     errs = {}
     for f in broken:
         errs[f.get("error_type") or "other"] = errs.get(f.get("error_type") or "other", 0) + 1
+    # survivors whose longest keepalive round trip began after the disruption started
+    stalls = [f.get("max_stall") or 0.0 for f in live
+              if f["status"] != "broken" and (f.get("stall_at") or 0) >= failtime - 1.0]
+    stalled = [x for x in stalls if x >= 1.0]
     return {
         "established": len(live),
         "pre_broken": len(flows) - len(live),
@@ -69,6 +75,9 @@ def flow_stats(data, failtime, killed):
         "collateral": len(coll),
         "collateral_pct": 100.0 * len(coll) / coll_den if coll_den > 0 else None,
         "errors": errs,
+        "stalled_1s": len(stalled),
+        "stalled_1s_pct": 100.0 * len(stalled) / len(live) if live else None,
+        "max_stall_s": round(max(stalls), 2) if stalls else 0.0,
     }
 
 
@@ -172,8 +181,11 @@ def main():
             c = [r["pops"][p]["collateral_pct"] for r in runs if p in r["pops"] and r["pops"][p]["collateral_pct"] is not None]
             n = [r["probes"][p]["fail_pct"] for r in runs if p in r["probes"] and r["probes"][p]["fail_pct"] is not None]
             o = [r["probes"][p]["max_outage_s"] for r in runs if p in r["probes"]]
+            st = [r["pops"][p]["stalled_1s_pct"] for r in runs if p in r["pops"] and r["pops"][p]["stalled_1s_pct"] is not None]
+            ms = [r["pops"][p]["max_stall_s"] for r in runs if p in r["pops"]]
             row[p] = {"broken_pct": (mean(b), sd(b)), "collateral_pct": (mean(c), sd(c)),
-                      "newconn_fail_pct": (mean(n), sd(n)), "max_outage_s": (mean(o), sd(o))}
+                      "newconn_fail_pct": (mean(n), sd(n)), "max_outage_s": (mean(o), sd(o)),
+                      "stalled_pct": (mean(st), sd(st)), "max_stall_s": (mean(ms), sd(ms))}
             pooled += c
         bg = [r["bgp"] for r in runs if r["bgp"]]
         row["podcidr_gap_s"] = mean([max(b["podcidr_absent_s"].values()) for b in bg]) if bg else None
@@ -187,7 +199,7 @@ def main():
     out.sort(key=lambda r: (r["score_collateral_pct"] is None, r["score_collateral_pct"] or 0))
 
     hdr = ("| cell | coll% ext-cil | coll% ext-static | coll% int | newconn fail% cil/static/int "
-           "| max outage s cil/static/int | podCIDR gap s | .20 degraded s | .21 degraded s | Cilium BGP down s |")
+           "| max outage s cil/static/int | stalled% cil/static/int | max stall s cil/static/int | podCIDR gap s | .20 degraded s | .21 degraded s | Cilium BGP down s |")
     lines = ["# Cilium disruption summary (least → most disruptive by pooled collateral broken%)", "",
              "coll% = established flows broken by the disruption, excluding flows on a backend the test "
              "killed on purpose. Values are mean±stddev over runs.", "", hdr,
@@ -201,6 +213,8 @@ def main():
             f"| {f('int','collateral_pct')} "
             f"| {f('ext-cil','newconn_fail_pct')} / {f('ext-static','newconn_fail_pct')} / {f('int','newconn_fail_pct')} "
             f"| {f('ext-cil','max_outage_s')} / {f('ext-static','max_outage_s')} / {f('int','max_outage_s')} "
+            f"| {f('ext-cil','stalled_pct')} / {f('ext-static','stalled_pct')} / {f('int','stalled_pct')} "
+            f"| {f('ext-cil','max_stall_s')} / {f('ext-static','max_stall_s')} / {f('int','max_stall_s')} "
             f"| {g(r['podcidr_gap_s'])} | {g(r['vip_cil_degraded_s'])} | {g(r['vip_static_degraded_s'])} "
             f"| {g(r['cilium_sess_down_s'])} |")
     md = "\n".join(lines) + "\n"

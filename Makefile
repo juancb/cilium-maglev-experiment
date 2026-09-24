@@ -66,7 +66,8 @@ test-maglev:
 # Test 5 env knobs (ALGOS, POLICIES, DISRUPTIONS, ...) must cross the wsl.exe boundary:
 # WSLENV only forwards listed variables, so pass them explicitly with env.
 DZ_VARS := ALGOS MODES POLICIES DISRUPTIONS TARGET_NODE IC_NODE KILL_COUNT UPGRADE_TO \
-           CILIUM_VERSION N RUNS REPLICAS PROBE_HZ DUR_ROLLOUT DUR_KILL SETTLE STRICT_BGP
+           CILIUM_VERSION N RUNS REPLICAS PROBE_HZ DUR_ROLLOUT DUR_KILL SETTLE STRICT_BGP \
+           FLOW_TIMEOUT
 DZ_ENV  := $(foreach v,$(DZ_VARS),$(if $($(v)),$(v)='$($(v))'))
 
 test-disruption:
@@ -80,4 +81,4 @@ apply-bgp:
 
 status:
 	MSYS_NO_PATHCONV=1 wsl -d Ubuntu-24.04 -u root -- \
-	  bash -c 'CLAB_VERSION_CHECK=disable containerlab inspect -t $(_DIR)/$(TOPO)'
+	  bash -c 'DOCKER_HOST=unix:///var/run/docker-native.sock CLAB_VERSION_CHECK=disable containerlab inspect -t $(_DIR)/$(TOPO)'

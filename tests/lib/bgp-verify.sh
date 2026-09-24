@@ -16,10 +16,10 @@ verify_bgp() {
   printf '  %-7s %-10s %-12s %-6s %-6s %s\n' node session state hold ka "neighbor GR capability"
   for n in "${NODES[@]}"; do
     node="${n#${PFX}-}"
-    # bird names each dynamic session spawned by "neighbor range" cilium1, cilium2, ...
+    # bird names each dynamic session spawned by "neighbor range" dynbgp1, dynbgp2, ...
     local protos
     protos="uplink0 uplink1 $(docker exec "$n" birdc show protocols 2>/dev/null \
-                              | awk '$1 ~ /^cilium[0-9]+$/ {print $1}' | tr '\n' ' ')"
+                              | awk '$1 ~ /^(dynbgp|cilium)[0-9]+$/ {print $1}' | tr '\n' ' ')"
     for p in $protos; do
       out=$(docker exec "$n" birdc show protocols all "$p" 2>/dev/null || true)
       local state; state=$(printf '%s\n' "$out" | awk '/BGP state:/ {print $3; exit}')
@@ -33,7 +33,7 @@ verify_bgp() {
       printf '  %-7s %-10s %-12s %-6s %-6s %s\n' "$node" "$p" "${state:-?}" "${hold:--}" "${ka:--}" "$ngr"
       if [ "${state:-}" != "Established" ] || [ "${hold:-}" != "$want" ]; then bad=1; fi
     done
-    case "$protos" in *cilium*) ;; *) printf '  %-7s %-10s %s\n' "$node" "cilium*" "NO SESSION"; bad=1 ;; esac
+    case "$protos" in *dynbgp*|*cilium[0-9]*) ;; *) printf '  %-7s %-10s %s\n' "$node" "cilium*" "NO SESSION"; bad=1 ;; esac
   done
 
   info "leaf side (FRR) of the node sessions"
