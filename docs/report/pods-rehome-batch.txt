@@ -1,0 +1,6 @@
+echo-6bc4b7c576-8fv8c 10.244.1.7 node1
+echo-6bc4b7c576-9m8th 10.244.2.191 node3
+echo-6bc4b7c576-n6bpq 10.244.0.223 node2
+echo-6bc4b7c576-rdt86 10.244.2.38 node3
+echo-6bc4b7c576-tq2qc 10.244.2.94 node3
+echo-6bc4b7c576-xfgf6 10.244.0.106 node2
