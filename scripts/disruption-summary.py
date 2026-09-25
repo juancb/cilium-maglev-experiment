@@ -13,6 +13,11 @@ traffic population (ext-cil, ext-static, int) it reports, as mean ± stddev over
   outage s     longest run of consecutive failed new connections
   stalled%     flows that SURVIVED but stalled >= 1s after the disruption started (a real
                client would see a hiccup, not an error); stall s = the longest such stall
+  stall p50/p95  over every flow that stalled >= 1s OR broke by timeout (the latter counted
+               as the flow timeout, so a trailing "+" means censored values are included)
+  re-homed%    external flows whose ingress node changed (from the per-node pcap, when
+               CAPTURE_PCAP=1); of those: broken%, and backend-changed% (same/changed
+               backend on the new ingress node, when the forward packets were captured)
 plus, from the leaf1 route timeline: the LONGEST single node's pod-CIDR absence (not the
 union across nodes; during a rollout two nodes can be missing at once), seconds the
 Cilium-only VIP had fewer nexthops than before, and the longest single node's
@@ -52,7 +57,34 @@ def sd(xs):
     return math.sqrt(sum((x - m) ** 2 for x in xs) / (len(xs) - 1))
 
 
-def flow_stats(data, failtime, killed):
+def pct(xs, q):
+    if not xs:
+        return None
+    xs = sorted(xs)
+    i = min(len(xs) - 1, max(0, int(round(q * (len(xs) - 1)))))
+    return xs[i]
+
+
+def rehoming_stats(path):
+    try:
+        sm = json.load(open(path))["summary"]
+    except Exception:
+        return None
+    seen = sm.get("rehomed_total", 0) + sm.get("stayed_survived", 0) + sm.get("stayed_broken", 0)
+    rh = sm.get("rehomed_total", 0)
+    known = sm.get("rehomed_same_backend", 0) + sm.get("rehomed_changed_backend", 0)
+    return {
+        "flows_seen": seen,
+        "rehomed": rh,
+        "rehomed_pct": 100.0 * rh / seen if seen else None,
+        "rehomed_broken_pct": 100.0 * sm.get("rehomed_broken", 0) / rh if rh else None,
+        "stayed_broken": sm.get("stayed_broken", 0),
+        "backend_changed_pct": 100.0 * sm.get("rehomed_changed_backend", 0) / known if known else None,
+        "backend_known": known,
+    }
+
+
+def flow_stats(data, failtime, killed, flow_timeout=None):
     flows = [f for f in data.get("flows", []) if f.get("established_at")]
     # flows that broke BEFORE the disruption are pre-existing noise: drop from the denominator
     live = [f for f in flows if not (f["status"] == "broken" and (f.get("broke_at") or 0) < failtime)]
@@ -67,7 +99,13 @@ def flow_stats(data, failtime, killed):
     stalls = [f.get("max_stall") or 0.0 for f in live
               if f["status"] != "broken" and (f.get("stall_at") or 0) >= failtime - 1.0]
     stalled = [x for x in stalls if x >= 1.0]
+    # stall distribution over everyone affected: survivors' longest stall plus timeouts,
+    # which are censored at the flow timeout
+    censored = [f for f in broken if (f.get("error_type") == "timeout") and flow_timeout]
+    dist = stalled + [float(flow_timeout)] * len(censored)
     return {
+        "stall_p50": pct(dist, 0.5), "stall_p95": pct(dist, 0.95),
+        "stall_censored": len(censored), "stall_n": len(dist),
         "established": len(live),
         "pre_broken": len(flows) - len(live),
         "broken": len(broken),
@@ -163,7 +201,10 @@ def main():
         for p in POPS:
             d = load(f"{rtag}.{p}.json")
             if d:
-                run["pops"][p] = flow_stats(d, meta["failtime"], killed)
+                run["pops"][p] = flow_stats(d, meta["failtime"], killed, meta.get("flow_timeout"))
+            rh = rehoming_stats(f"{rtag}.{p}.rehoming.json")
+            if rh:
+                run.setdefault("rehoming", {})[p] = rh
             pr = load(f"{rtag}.probe-{p}.json")
             if pr:
                 run["probes"][p] = probe_stats(pr, meta["failtime"], window_end)
@@ -184,9 +225,19 @@ def main():
             o = [r["probes"][p]["max_outage_s"] for r in runs if p in r["probes"]]
             st = [r["pops"][p]["stalled_1s_pct"] for r in runs if p in r["pops"] and r["pops"][p]["stalled_1s_pct"] is not None]
             ms = [r["pops"][p]["max_stall_s"] for r in runs if p in r["pops"]]
+            p50 = [r["pops"][p]["stall_p50"] for r in runs if p in r["pops"] and r["pops"][p]["stall_p50"] is not None]
+            p95 = [r["pops"][p]["stall_p95"] for r in runs if p in r["pops"] and r["pops"][p]["stall_p95"] is not None]
+            cens = sum(r["pops"][p]["stall_censored"] for r in runs if p in r["pops"])
+            rp = [r["rehoming"][p]["rehomed_pct"] for r in runs if p in r.get("rehoming", {}) and r["rehoming"][p]["rehomed_pct"] is not None]
+            rb = [r["rehoming"][p]["rehomed_broken_pct"] for r in runs if p in r.get("rehoming", {}) and r["rehoming"][p]["rehomed_broken_pct"] is not None]
+            bc = [r["rehoming"][p]["backend_changed_pct"] for r in runs if p in r.get("rehoming", {}) and r["rehoming"][p]["backend_changed_pct"] is not None]
             row[p] = {"broken_pct": (mean(b), sd(b)), "collateral_pct": (mean(c), sd(c)),
                       "newconn_fail_pct": (mean(n), sd(n)), "max_outage_s": (mean(o), sd(o)),
-                      "stalled_pct": (mean(st), sd(st)), "max_stall_s": (mean(ms), sd(ms))}
+                      "stalled_pct": (mean(st), sd(st)), "max_stall_s": (mean(ms), sd(ms)),
+                      "stall_p50": (mean(p50), sd(p50)), "stall_p95": (mean(p95), sd(p95)),
+                      "stall_censored": cens,
+                      "rehomed_pct": (mean(rp), sd(rp)), "rehomed_broken_pct": (mean(rb), sd(rb)),
+                      "backend_changed_pct": (mean(bc), sd(bc))}
             pooled += c
         bg = [r["bgp"] for r in runs if r["bgp"]]
         row["podcidr_gap_s"] = mean([max(b["podcidr_absent_s"].values()) for b in bg]) if bg else None
@@ -200,11 +251,17 @@ def main():
     out.sort(key=lambda r: (r["score_collateral_pct"] is None, r["score_collateral_pct"] or 0))
 
     hdr = ("| cell | coll% ext-cil | coll% ext-static | coll% int | newconn fail% cil/static/int "
-           "| max outage s cil/static/int | stalled% cil/static/int | max stall s cil/static/int | podCIDR gap s | .20 degraded s | .21 degraded s | Cilium BGP down s |")
+           "| max outage s cil/static/int | stalled% cil/static/int | stall p50/p95 s cil · static · int | re-homed% cil/static | of re-homed: broken% cil/static | backend changed% cil/static | podCIDR gap s | .20 degraded s | .21 degraded s | Cilium BGP down s |")
     lines = ["# Cilium disruption summary (least → most disruptive by pooled collateral broken%)", "",
              "coll% = established flows broken by the disruption, excluding flows on a backend the test "
              "killed on purpose. Values are mean±stddev over runs.", "", hdr,
              "|" + "---|" * (hdr.count("|") - 1)]
+    def sp(r, p):
+        a, b = r[p]["stall_p50"][0], r[p]["stall_p95"][0]
+        if a is None:
+            return "-"
+        return f"{a:.1f}/{b:.1f}" + ("+" if r[p]["stall_censored"] else "")
+
     for r in out:
         f = lambda p, k, d=1: fmt(*r[p][k], digits=d)
         g = lambda v: "-" if v is None else f"{v:.1f}"
@@ -215,7 +272,10 @@ def main():
             f"| {f('ext-cil','newconn_fail_pct')} / {f('ext-static','newconn_fail_pct')} / {f('int','newconn_fail_pct')} "
             f"| {f('ext-cil','max_outage_s')} / {f('ext-static','max_outage_s')} / {f('int','max_outage_s')} "
             f"| {f('ext-cil','stalled_pct')} / {f('ext-static','stalled_pct')} / {f('int','stalled_pct')} "
-            f"| {f('ext-cil','max_stall_s')} / {f('ext-static','max_stall_s')} / {f('int','max_stall_s')} "
+            f"| {sp(r,'ext-cil')} · {sp(r,'ext-static')} · {sp(r,'int')} "
+            f"| {f('ext-cil','rehomed_pct')} / {f('ext-static','rehomed_pct')} "
+            f"| {f('ext-cil','rehomed_broken_pct')} / {f('ext-static','rehomed_broken_pct')} "
+            f"| {f('ext-cil','backend_changed_pct')} / {f('ext-static','backend_changed_pct')} "
             f"| {g(r['podcidr_gap_s'])} | {g(r['vip_cil_degraded_s'])} | {g(r['vip_static_degraded_s'])} "
             f"| {g(r['cilium_sess_down_s'])} |")
     md = "\n".join(lines) + "\n"

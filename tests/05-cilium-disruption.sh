@@ -11,6 +11,9 @@
 #                  repo), rolled back after the run (unmeasured).
 #   agent-kill     SIGKILL cilium-agent on TARGET_NODE, i.e. what the kernel OOM killer
 #                  does. kubelet restarts it in place.
+#   agent-delete   delete the cilium pod on TARGET_NODE; the DaemonSet replaces it. One
+#                  node's worth of a rollout (init containers and all), for repeating a
+#                  single-node pod replacement many times (RUNS=10).
 #   backend-kill   SIGKILL KILL_COUNT echo backend(s) on TARGET_NODE (app OOM). Flows on
 #                  the killed backend die by definition; what matters is COLLATERAL
 #                  breakage of flows on the other backends.
@@ -34,11 +37,17 @@
 #
 # Env knobs:
 #   ALGOS ("maglev random")  MODES ("snat")  POLICIES ("Cluster:Cluster Local:Local")
-#   DISRUPTIONS ("agent-restart agent-upgrade agent-kill backend-kill")
+#   DISRUPTIONS ("agent-restart agent-kill backend-kill", plus agent-upgrade when UPGRADE_TO
+#     is set; also agent-delete)
 #   TARGET_NODE (node2)  IC_NODE (=TARGET_NODE)  KILL_COUNT (1 | all)
-#   CILIUM_VERSION (1.19.1)  UPGRADE_TO (latest = newest patch of CILIUM_VERSION's minor)
+#   CILIUM_VERSION (1.19.1)  UPGRADE_TO (unset; "latest" = newest patch of that minor)
+#   MAX_UNAVAILABLE (unset = chart default, 2): DaemonSet rollingUpdate.maxUnavailable
+#   CAPTURE_PCAP (1): per-node capture of client->VIP and node->backend packets, reduced
+#     to 1s buckets on the node; scripts/analyze-rehoming.py then labels every external
+#     flow re-homed/stayed and same/changed backend (results/<run>.ext-*.rehoming.json)
+#   RUN_LABEL (unset): write results under results/<RUN_LABEL>/ instead of results/
 #   N (200 flows per population)  RUNS (2)  REPLICAS (6)  PROBE_HZ (10)
-#   DUR_ROLLOUT (200)  DUR_KILL (75)  SETTLE (15)  STRICT_BGP (0)
+#   DUR_ROLLOUT (200)  DUR_KILL (75)  DUR_DELETE (150)  SETTLE (15)  STRICT_BGP (0)
 #   FLOW_TIMEOUT (30): seconds a flow may stall before it counts as broken. A real TCP
 #     client keeps retransmitting through a short outage, so a stall is reported
 #     separately (max_stall) rather than as a break.
@@ -51,14 +60,19 @@ words() { echo "${1//,/ }"; }
 ALGOS=$(words "${ALGOS:-maglev random}")
 MODES=$(words "${MODES:-snat}")
 POLICIES=$(words "${POLICIES:-Cluster:Cluster Local:Local}")
-UPGRADE_TO="${UPGRADE_TO:-latest}"
-DISRUPTIONS=$(words "${DISRUPTIONS:-agent-restart agent-upgrade agent-kill backend-kill}")
+UPGRADE_TO="${UPGRADE_TO:-}"
+_dd="agent-restart agent-kill backend-kill"; [ -n "$UPGRADE_TO" ] && _dd+=" agent-upgrade"
+DISRUPTIONS=$(words "${DISRUPTIONS:-$_dd}")
 TARGET_NODE="${TARGET_NODE:-node2}"; TARGET_CTR="${PFX}-${TARGET_NODE}"
 IC_NODE="${IC_NODE:-$TARGET_NODE}"
 KILL_COUNT="${KILL_COUNT:-1}"
 N="${N:-200}"; RUNS="${RUNS:-2}"; REPLICAS="${REPLICAS:-6}"; PROBE_HZ="${PROBE_HZ:-10}"
-DUR_ROLLOUT="${DUR_ROLLOUT:-200}"; DUR_KILL="${DUR_KILL:-75}"; SETTLE="${SETTLE:-15}"
+DUR_ROLLOUT="${DUR_ROLLOUT:-200}"; DUR_KILL="${DUR_KILL:-75}"; DUR_DELETE="${DUR_DELETE:-150}"; SETTLE="${SETTLE:-15}"
 FLOW_TIMEOUT="${FLOW_TIMEOUT:-30}"
+MAX_UNAVAILABLE="${MAX_UNAVAILABLE:-}"
+CAPTURE_PCAP="${CAPTURE_PCAP:-1}"
+RUN_LABEL="${RUN_LABEL:-}"
+[ -n "$RUN_LABEL" ] && { RESULTS_DIR="${RESULTS_DIR}/${RUN_LABEL}"; mkdir -p "$RESULTS_DIR"; }
 STRICT_BGP="${STRICT_BGP:-0}"
 BASE_VALUES="cilium-values-maglev.yaml"
 VIP_CIL="192.0.2.20"; VIP_STATIC="192.0.2.21"
@@ -98,7 +112,8 @@ for r in json.load(sys.stdin):
 helm_cilium() {  # algo mode version
   helm1 upgrade cilium cilium/cilium -n kube-system --version "$3" \
     -f "/opt/k8s/${BASE_VALUES}" --reset-values \
-    --set loadBalancer.algorithm="$1" --set loadBalancer.mode="$2" >/dev/null
+    --set loadBalancer.algorithm="$1" --set loadBalancer.mode="$2" \
+    ${MAX_UNAVAILABLE:+--set updateStrategy.rollingUpdate.maxUnavailable="$MAX_UNAVAILABLE"} >/dev/null
 }
 
 apply_cilium() {  # algo mode
@@ -295,6 +310,23 @@ disrupt() {  # disruption
       wait_restarted kube-system "$pod" cilium-agent "${rc0:-0}" 240 || yellow "  WARNING: agent not back Ready"
       wait_cilium_session "$TARGET_CTR" 120 || yellow "  INFO: Cilium BGP not back on ${TARGET_NODE}"
       ;;
+    agent-delete)
+      local old new i
+      old=$(cilium_pod_on "$TARGET_NODE")
+      info "DISRUPT: delete cilium pod ${old} on ${TARGET_NODE} (DaemonSet replaces it)"
+      kc -n kube-system delete pod "$old" --wait=false >/dev/null
+      new=""
+      for i in $(seq 1 400); do
+        # while the old pod is Terminating both exist on the node; pick the other one
+        new=$(kc -n kube-system get pods -l k8s-app=cilium --field-selector "spec.nodeName=${TARGET_NODE}" \
+                -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr " " "\n" | grep -vx "$old" | head -1 || true)
+        [ -n "$new" ] && [ "$(container_ready kube-system "$new" cilium-agent)" = "true" ] && break
+        sleep 1
+      done
+      [ -n "$new" ] && [ "$(container_ready kube-system "$new" cilium-agent)" = "true" ] \
+        || yellow "  WARNING: replacement cilium pod on ${TARGET_NODE} not Ready"
+      wait_cilium_session "$TARGET_CTR" 120 || yellow "  INFO: Cilium BGP not back on ${TARGET_NODE}"
+      ;;
     backend-kill)
       local pods=() p
       read -r -a pods <<<"$(kc -n default get pods -l app=echo --field-selector "spec.nodeName=${TARGET_NODE}" \
@@ -324,6 +356,53 @@ after_run() {  # disruption: undo anything persistent (unmeasured)
     info "rolling Cilium back to ${CILIUM_VERSION} (not measured)"
     apply_cilium "$CUR_ALGO" "$CUR_MODE"
   fi
+}
+
+# ── Per-node packet capture (CAPTURE_PCAP=1) ─────────────────────────────────
+# Capture only the packets the re-homing analysis needs: client->VIP (which node
+# ingressed the flow) and the ingress node's forward to the backend pod (client-src for
+# DSR, node-IP-src for SNAT; the source port is preserved either way). The pcap stays in
+# the node's /tmp; only a 1s-bucketed, per-(src,dst) count file crosses the 9p mount.
+DZ_PCAP_FILTER="dst port ${VIP_PORT} and (src host ${SRC} or src net 10.10.0.0/24)"
+dz_pcap_start() {  # rtag
+  [ "$CAPTURE_PCAP" = "1" ] || return 0
+  local n
+  for n in "${NODES[@]}"; do
+    docker exec "$n" pkill -x tcpdump 2>/dev/null || true
+    docker exec "$n" rm -f "/tmp/dz.pcap" 2>/dev/null || true
+    docker exec -d "$n" tcpdump -i any -nn -s 96 -w /tmp/dz.pcap "$DZ_PCAP_FILTER" 2>/dev/null \
+      || yellow "  WARN: tcpdump failed to start on ${n#${PFX}-}"
+  done
+  sleep 1
+}
+dz_pcap_stop() {  # rtag
+  [ "$CAPTURE_PCAP" = "1" ] || return 0
+  local n node pop vip
+  for n in "${NODES[@]}"; do docker exec "$n" pkill -x tcpdump 2>/dev/null || true; done
+  sleep 2
+  for n in "${NODES[@]}"; do
+    node="${n#${PFX}-}"
+    for pop in ext-cil ext-static; do
+      vip="$VIP_CIL"; [ "$pop" = ext-static ] && vip="$VIP_STATIC"
+      # "<sec>.0 <src>.<sport> > <dst>.<dport> <count>", one line per (second, src, dst)
+      docker exec "$n" sh /tmp/pcap-reduce.sh /tmp/dz.pcap "$SRC" "$vip" \
+        > "${RESULTS_DIR}/${1}.${pop}.${node}.txt" 2>/dev/null || true
+    done
+  done
+}
+dz_rehoming() {  # rtag failtime -> prints, writes <rtag>.<pop>.rehoming.json
+  [ "$CAPTURE_PCAP" = "1" ] || return 0
+  local pop vip f tmp
+  for pop in ext-cil ext-static int; do
+    f="${RESULTS_DIR}/${1}.${pop}.json"
+    [ -s "$f" ] || continue
+    tmp=$(mktemp); jq --argjson ft "$2" '.summary.failtime = $ft' "$f" > "$tmp" && mv "$tmp" "$f" || rm -f "$tmp"
+  done
+  for pop in ext-cil ext-static; do
+    vip="$VIP_CIL"; [ "$pop" = ext-static ] && vip="$VIP_STATIC"
+    [ -s "${RESULTS_DIR}/${1}.${pop}.json" ] || continue
+    python3 "${REPO_ROOT}/scripts/analyze-rehoming.py" "$RESULTS_DIR" "${1}.${pop}" --vip "$vip" 2>&1 | sed 's/^/  /' || true
+  done
 }
 
 # ── One run ──────────────────────────────────────────────────────────────────
@@ -375,7 +454,8 @@ run_once() {  # cell run disruption etp itp
   ensure_healthy
 
   local dur="$DUR_KILL"
-  case "$d" in agent-restart|agent-upgrade) dur="$DUR_ROLLOUT" ;; esac
+  case "$d" in agent-restart|agent-upgrade) dur="$DUR_ROLLOUT" ;; agent-delete) dur="$DUR_DELETE" ;; esac
+  dz_pcap_start "$r"
   local t0; t0=$(date +%s.%N)
   step "starting ${N} flows x3 populations + new-connection probes (${dur}s)"
   start_clients "$r" "$dur"
@@ -403,6 +483,8 @@ run_once() {  # cell run disruption etp itp
   local left; left=$(python3 -c "import time; print(max(10, int(${t0}+${dur}-time.time())+30))")
   collect_clients "$r" "$left"
   touch "$stopf"; wait "$BGPW_PID" 2>/dev/null || true; BGPW_PID=""; rm -f "$stopf"
+  dz_pcap_stop "$r"
+  dz_rehoming "$r" "$failtime"
 
   local killed_json
   killed_json=$(printf '%s\n' "${KILLED[@]:-}" | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')
@@ -410,6 +492,7 @@ run_once() {  # cell run disruption etp itp
 {"cell":"${cell}","run":${run},"disruption":"${d}","algo":"${CUR_ALGO}","mode":"${CUR_MODE}",
  "etp":"${etp}","itp":"${itp}","target_node":"${TARGET_NODE}","ic_node":"${IC_NODE}",
  "kill_count":"${KILL_COUNT}","cilium_version":"${CILIUM_VERSION}","upgrade_to":"${UPGRADE_TO}",
+ "max_unavailable":"${MAX_UNAVAILABLE}","run_label":"${RUN_LABEL}",
  "t0":${t0},"failtime":${failtime},"endtime":${endtime},"settle":${SETTLE},"dur":${dur},"flow_timeout":${FLOW_TIMEOUT},
  "truncated":${truncated},"killed":${killed_json}}
 EOF
@@ -435,8 +518,9 @@ trap dz_cleanup EXIT
 case "$TARGET_NODE" in node1|node2|node3) ;; *) red "TARGET_NODE must be node1..3"; exit 2 ;; esac
 for d in $DISRUPTIONS; do
   case "$d" in
-    agent-restart|agent-upgrade|agent-kill|backend-kill) ;;
-    *) red "unknown disruption '$d' (agent-restart agent-upgrade agent-kill backend-kill)"; exit 2 ;;
+    agent-restart|agent-kill|agent-delete|backend-kill) ;;
+    agent-upgrade) [ -n "$UPGRADE_TO" ] || { red "agent-upgrade needs UPGRADE_TO=<version|latest>"; exit 2; } ;;
+    *) red "unknown disruption '$d' (agent-restart agent-upgrade agent-kill agent-delete backend-kill)"; exit 2 ;;
   esac
 done
 installed=$(installed_cilium_version || true)
@@ -458,6 +542,7 @@ n_cells=$(( n_a * n_m * n_p * n_d ))
 info "Test 5 (Cilium disruption): ${n_cells} cells x ${RUNS} runs | Cilium ${CILIUM_VERSION}${UPGRADE_TO:+ -> ${UPGRADE_TO}}"
 info "  algos=[${ALGOS}] modes=[${MODES}] policies(eTP:iTP)=[${POLICIES}] disruptions=[${DISRUPTIONS}]"
 info "  target=${TARGET_NODE} ic_node=${IC_NODE} kill_count=${KILL_COUNT} N=${N}/population replicas=${REPLICAS}"
+info "  max_unavailable=${MAX_UNAVAILABLE:-chart default} capture_pcap=${CAPTURE_PCAP} results=${RESULTS_DIR}"
 
 if ! verify_bgp; then
   [ "$STRICT_BGP" = "1" ] && { red "STRICT_BGP=1: fix BGP first (bash scripts/apply-bgp-config.sh)"; exit 1; }
@@ -474,6 +559,7 @@ kc -n default rollout restart deploy/echo >/dev/null
 kc -n default rollout status deploy/echo --timeout=180s 2>&1 | sed 's/^/  /'
 docker cp "${REPO_ROOT}/tests/lib/flowgen/flowgen.py"   "${CLIENT}:/opt/flowgen/flowgen.py" >/dev/null
 docker cp "${REPO_ROOT}/tests/lib/flowgen/connprobe.py" "${CLIENT}:/opt/flowgen/connprobe.py" >/dev/null
+for n in "${NODES[@]}"; do docker cp "${REPO_ROOT}/tests/lib/pcap-reduce.sh" "${n}:/tmp/pcap-reduce.sh" >/dev/null; done
 deploy_ic_client
 
 for mode in $MODES; do

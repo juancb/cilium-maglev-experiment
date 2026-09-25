@@ -66,8 +66,8 @@ test-maglev:
 # Test 5 env knobs (ALGOS, POLICIES, DISRUPTIONS, ...) must cross the wsl.exe boundary:
 # WSLENV only forwards listed variables, so pass them explicitly with env.
 DZ_VARS := ALGOS MODES POLICIES DISRUPTIONS TARGET_NODE IC_NODE KILL_COUNT UPGRADE_TO \
-           CILIUM_VERSION N RUNS REPLICAS PROBE_HZ DUR_ROLLOUT DUR_KILL SETTLE STRICT_BGP \
-           FLOW_TIMEOUT
+           CILIUM_VERSION N RUNS REPLICAS PROBE_HZ DUR_ROLLOUT DUR_KILL DUR_DELETE SETTLE STRICT_BGP \
+           FLOW_TIMEOUT MAX_UNAVAILABLE CAPTURE_PCAP RUN_LABEL
 DZ_ENV  := $(foreach v,$(DZ_VARS),$(if $($(v)),$(v)='$($(v))'))
 
 test-disruption:
