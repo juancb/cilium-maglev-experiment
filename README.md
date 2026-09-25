@@ -91,7 +91,10 @@ Three client populations run through each disruption at once:
   (`POLICIES="Cluster:Cluster Local:Local"`) instead of crossing them.
 
 Each population also runs a new-connection prober, and leaf1's routes for both VIPs and every
-pod CIDR are sampled every second. `scripts/disruption-summary.py` ranks the cells from least
+pod CIDR are sampled 4x a second. With `CAPTURE_PCAP=1` (the default) each node captures
+client->VIP and node->backend packets, reduces them on the node, and
+`scripts/analyze-rehoming.py` labels every external flow re-homed/stayed and same/changed
+backend, so a break can be attributed to a re-home rather than inferred. `scripts/disruption-summary.py` ranks the cells from least
 to most disruptive by **collateral** broken flows (it excludes flows whose backend was killed
 on purpose) and writes `results/disruption-summary.{md,json}`.
 
@@ -99,9 +102,12 @@ on purpose) and writes `results/disruption-summary.{md,json}`.
 make test-disruption                                    # full default matrix
 ALGOS=maglev DISRUPTIONS=agent-kill RUNS=1 make test-disruption
 POLICIES="Local:Cluster Cluster:Local" MODES="snat dsr" make test-disruption
-DISRUPTIONS=agent-upgrade make test-disruption        # 1.19.1 -> newest 1.19.x (resolved from the helm repo)
+UPGRADE_TO=latest DISRUPTIONS=agent-upgrade make test-disruption   # 1.19.1 -> newest 1.19.x (opt-in)
 UPGRADE_TO=1.19.5 DISRUPTIONS=agent-upgrade make test-disruption
 KILL_COUNT=all DISRUPTIONS=backend-kill make test-disruption   # the node loses every local backend
+MAX_UNAVAILABLE=1 DISRUPTIONS=agent-restart make test-disruption   # roll one node at a time
+DISRUPTIONS=agent-delete RUNS=10 make test-disruption          # one node's pod replaced, 10 times
+RUN_LABEL=mytry ... make test-disruption                       # results/mytry/ instead of results/
 ```
 
 BGP mirrors prod: hold 90 s / keepalive 30 s on node↔leaf and bird↔Cilium, no BFD, and no
