@@ -6,9 +6,12 @@ For one run (tag like 'snat-leaf-failure_maglev-on.run1') it reads:
   results/<tag>.json            flowgen: failtime + per-flow {srcport, backend, status, broke_at}
   results/<tag>.<node>.txt      tcpdump -tt decode of that node's client->VIP packets
 
-For each client source port it decides which node ingressed the flow BEFORE vs
-AFTER failtime, hence whether the flow re-homed, and joins that with whether the
-flow survived. This finally separates:
+For each client source port it decides which node ingressed the flow BEFORE
+failtime and whether ANY other node saw it after failtime (a re-home), and joins that
+with whether the flow survived. "Any other node" rather than "dominant node after"
+because a flow can re-home and break within a second (few packets on the new node), or
+re-home and move BACK once the route returns (tests/05 agent-kill: ~11s away, then
+home again); both would look like "stayed" to a dominance test. This separates:
   - re-homed & survived  → Maglev preserved the backend (working as designed)
   - re-homed & broken    → backend changed on re-home (Maglev mismatch / RST)
   - not re-homed & broken → broke for another reason (e.g. reconvergence blackhole)
@@ -22,6 +25,9 @@ Usage: python3 scripts/analyze-rehoming.py <results-dir> <tag> [--flows F] [--vi
   --vip V    only count client->V packets as ingress evidence (tests/05 captures two VIPs
              from the same client in one pcap)
   --out T    write <T>.rehoming.json instead of <tag>.rehoming.json
+  --pods F   "name ip node" per line. Only needed for captures reduced WITHOUT a direction
+             column (older tests/05 runs): a forward packet seen on the node that hosts
+             the pod is inbound there, not that node's choice of backend, so it is dropped.
 
 If the per-node txt also holds the ingress node's forward packets to the backend pod
 (client->pod for DSR, node-IP->pod for SNAT; the source port is preserved), each flow also
@@ -34,11 +40,12 @@ import json, os, re, sys, glob
 # each node capture to 1-second buckets on the node so only a few MB cross the 9p mount.
 SRC_RE = re.compile(r"^(\d+\.\d+)\s+.*?\b203\.0\.113\.1\.(\d+)\s+>\s(\d+\.\d+\.\d+\.\d+)\.\d+")
 CNT_RE = re.compile(r"\s(\d+)$")
+DIR_RE = re.compile(r"\s(In|Out)\s")
 # forward packet to a backend pod: <client or node IP>.<sport> > <pod IP>.8080
 FWD_RE = re.compile(r"^(\d+\.\d+)\s+.*?\b(?:203\.0\.113\.1|10\.10\.0\.\d+)\.(\d+)\s+>\s(10\.244\.\d+\.\d+)\.8080")
 
 
-def parse_node_txt(path, vip=None):
+def parse_node_txt(path, vip=None, local_pods=frozenset()):
     """node txt -> ({srcport: [ts]} ingress evidence, {srcport: [(ts, pod_ip)]} forwards)"""
     flows, fwds = {}, {}
     if not os.path.exists(path):
@@ -47,10 +54,19 @@ def parse_node_txt(path, vip=None):
         line = line.strip()
         c = CNT_RE.search(line)
         w = int(c.group(1)) if c and " > " in line and line.count(":") == 0 else 1
+        dm = DIR_RE.search(line)
+        direction = dm.group(1) if dm else None
         m = FWD_RE.match(line)
         if m:
+            # only the forwarding node's view ("Out") says which backend it chose; the pod's
+            # host sees the same packet "In". Without a direction column, fall back to the
+            # pod->node map.
+            if direction == "In" or (direction is None and m.group(3) in local_pods):
+                continue
             fwds.setdefault(int(m.group(2)), []).append((float(m.group(1)), m.group(3), w))
             continue
+        if direction == "Out":
+            continue   # a client->VIP packet leaving a node is not ingress evidence
         m = SRC_RE.match(line)
         if not m:
             continue
@@ -82,8 +98,14 @@ def main():
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("dir"); ap.add_argument("tag")
-    ap.add_argument("--flows"); ap.add_argument("--vip"); ap.add_argument("--out")
+    ap.add_argument("--flows"); ap.add_argument("--vip"); ap.add_argument("--out"); ap.add_argument("--pods")
     args = ap.parse_args()
+    pods_by_node = {}
+    if args.pods:
+        for l in open(args.pods):
+            parts = l.split()
+            if len(parts) >= 3:
+                pods_by_node.setdefault(parts[2], set()).add(parts[1])
     d, tag = args.dir, args.tag
     out_tag = args.out or tag
 
@@ -102,18 +124,18 @@ def main():
     nodes, fwds = {}, {}
     for p in node_txts:
         node = os.path.basename(p)[len(tag) + 1:-4]  # strip "<tag>." and ".txt"
-        nodes[node], fwds[node] = parse_node_txt(p, args.vip)
+        nodes[node], fwds[node] = parse_node_txt(p, args.vip, frozenset(pods_by_node.get(node, ())))
     if not nodes:
         sys.stderr.write("no per-node .txt captures found; was CAPTURE_PCAP=1?\n"); sys.exit(1)
 
-    # invert: srcport -> {node: [ts]}; srcport -> [(ts, pod)] across nodes
+    # invert: srcport -> {node: [(ts, w)]}; srcport -> {node: [(ts, pod, w)]}
     by_sp, fwd_sp = {}, {}
     for node, flows in nodes.items():
         for sp, tss in flows.items():
             by_sp.setdefault(sp, {})[node] = tss
     for node, f in fwds.items():
         for sp, lst in f.items():
-            fwd_sp.setdefault(sp, []).extend(lst)
+            fwd_sp.setdefault(sp, {})[node] = lst
 
     # flowgen per-flow facts
     fg = {}
@@ -126,39 +148,48 @@ def main():
     cnt = {"rehomed_survived": 0, "rehomed_broken": 0,
            "stayed_survived": 0, "stayed_broken": 0,
            "unknown": 0}
-    be_cnt = {"rehomed_same_backend": 0, "rehomed_changed_backend": 0, "rehomed_backend_unknown": 0}
+    be_cnt = {"rehomed_same_backend": 0, "rehomed_changed_backend": 0, "rehomed_backend_unknown": 0,
+              "rehomed_returned": 0}
     for sp, per_node in by_sp.items():
         if sp not in fg:
             continue   # a probe or warm-up connection, not one of this population's flows
         nb, nbn = dominant_node(per_node, hi=failtime)
-        na, nan = dominant_node(per_node, lo=failtime)
+        # every node that saw client->VIP packets for this flow after failtime
+        after_nodes = {n for n, tss in per_node.items() if any(t >= failtime for t, w in tss)}
+        new_nodes = sorted(after_nodes - {nb}) if nb else []
+        # the node that saw the flow last (bucket resolution): did it move back home?
+        last_node = None
+        if after_nodes:
+            last_node = max(after_nodes, key=lambda n: max(t for t, w in per_node[n] if t >= failtime))
         fl = fg.get(sp, {})
-        # backend chosen on the ingress node before vs after (from forward packets)
-        bb = dominant_backend(fwd_sp.get(sp, []), hi=failtime)
-        # "after" = the first backend used on the NEW ingress node, so a flow that
-        # re-homes, breaks and is never retried still gets attributed
-        ba = dominant_backend([x for x in fwd_sp.get(sp, []) if x[0] >= failtime and x[0] < failtime + 5]) \
-             or dominant_backend(fwd_sp.get(sp, []), lo=failtime)
+        # backend chosen by the old ingress node before, and by the NEW ingress node after
+        # (from each node's own forward packets; invisible when the backend is local to it)
+        bb = dominant_backend(fwd_sp.get(sp, {}).get(nb, []), hi=failtime) if nb else None
+        ba = None
+        for n in new_nodes:
+            ba = ba or dominant_backend(fwd_sp.get(sp, {}).get(n, []), lo=failtime)
         status = fl.get("status")
         broke_after = bool(fl.get("broke_at") and fl["broke_at"] >= failtime)
         broken = (status == "broken" and broke_after)
-        if nb is None or na is None:
-            cat = "unknown"
+        if nb is None or not after_nodes:
+            cat = "unknown"; rehomed = False
         else:
-            rehomed = (nb != na)
+            rehomed = bool(new_nodes)
             if rehomed and broken:   cat = "rehomed_broken"
             elif rehomed:            cat = "rehomed_survived"
             elif broken:             cat = "stayed_broken"
             else:                    cat = "stayed_survived"
         cnt[cat] += 1
-        rehomed = (nb is not None and na is not None and nb != na)
         if rehomed:
             if bb and ba:
                 be_cnt["rehomed_same_backend" if bb == ba else "rehomed_changed_backend"] += 1
             else:
                 be_cnt["rehomed_backend_unknown"] += 1
-        records.append({"srcport": sp, "node_before": nb, "node_after": na,
-                        "rehomed": rehomed,
+            if last_node == nb:
+                be_cnt["rehomed_returned"] += 1
+        records.append({"srcport": sp, "node_before": nb, "node_after": (new_nodes[0] if new_nodes else nb),
+                        "nodes_after": sorted(after_nodes), "last_node": last_node,
+                        "rehomed": rehomed, "returned": (rehomed and last_node == nb),
                         "backend": fl.get("backend"), "status": status,
                         "backend_before": bb, "backend_after": ba,
                         "backend_changed": (bb != ba) if (bb and ba) else None,
@@ -185,7 +216,8 @@ def main():
           f"stayed (survived {cnt['stayed_survived']}, broken {cnt['stayed_broken']}); "
           f"unknown {cnt['unknown']}; "
           f"re-homed backend same {be_cnt['rehomed_same_backend']} / changed "
-          f"{be_cnt['rehomed_changed_backend']} / unknown {be_cnt['rehomed_backend_unknown']}")
+          f"{be_cnt['rehomed_changed_backend']} / unknown {be_cnt['rehomed_backend_unknown']}; "
+          f"moved back home {be_cnt['rehomed_returned']}")
     if rehomed_total == 0:
         print("  -> NO re-homing observed: the failure did not move flows to a new ingress "
               "node, so this run does not exercise Maglev.")
