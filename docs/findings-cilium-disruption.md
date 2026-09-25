@@ -173,6 +173,23 @@ restored to no-GR and re-verified.
 
 ## Caveats
 
+- **ext-cil percentages are not comparable across cells.** A `.20` flow can only break
+  after it re-homes, and the re-home fraction depends on which leaf nexthop the kernel
+  removes and on that run's source ports. Under eTP=Local every re-homed flow must break,
+  yet those four agent-kill cells range 31–38%, so the re-home rate itself varies by cell.
+  Read DSR+Maglev **0%** and "SNAT: Maglev ≈ random" as solid; do not read DSR+random
+  7.5% as a precise number. Test 5 does not yet do the per-flow ingress-node verification
+  that `tests/04d` does with `CAPTURE_PCAP=1`; it should.
+- **`random` is not characterised.** DSR+random broke far fewer re-homed flows than a
+  uniform pick would (expected ~5/6 of re-homed). Whether Cilium 1.19's `random` is
+  uniform across nodes was not checked. Treat that arm as "not Maglev".
+- **"Broken" during rollouts means stalled > 30s**, the threshold this test uses. The
+  pod-CIDR gap was 28–85s, so the ~70% is really "stalled for 30–85s". A stall-duration
+  distribution would be the better headline for the GR-off rollout case.
+- **`podCIDR gap s` is the longest single node's gap**, not the union; two nodes were
+  missing at once during rollouts.
+- **Not measured:** a node losing its last local backend under eTP=Local
+  (`KILL_COUNT=all`), and in-cluster clients on a node other than the disrupted one.
 - **Absolute gap durations are lab-inflated.** Agent pod start-up on WSL/9p is slow. Prod
   will be shorter, but the mechanism (routes absent for the agent's whole restart) is the
   same.

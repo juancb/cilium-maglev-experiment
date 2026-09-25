@@ -13,9 +13,10 @@ traffic population (ext-cil, ext-static, int) it reports, as mean ± stddev over
   outage s     longest run of consecutive failed new connections
   stalled%     flows that SURVIVED but stalled >= 1s after the disruption started (a real
                client would see a hiccup, not an error); stall s = the longest such stall
-plus, from the leaf1 route timeline: seconds any node's pod CIDR was missing from the
-fabric, seconds the Cilium-only VIP had fewer nexthops than before, and seconds any
-bird<->Cilium session was down.
+plus, from the leaf1 route timeline: the LONGEST single node's pod-CIDR absence (not the
+union across nodes; during a rollout two nodes can be missing at once), seconds the
+Cilium-only VIP had fewer nexthops than before, and the longest single node's
+bird<->Cilium session outage.
 
 Writes results/disruption-summary.json and results/disruption-summary.md and prints the
 table ranked from least to most disruptive (by pooled collateral broken%).
