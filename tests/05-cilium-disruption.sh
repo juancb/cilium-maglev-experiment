@@ -486,15 +486,19 @@ run_once() {  # cell run disruption etp itp
   dz_pcap_stop "$r"
   dz_rehoming "$r" "$failtime"
 
-  local killed_json
+  local killed_json pods_json
   killed_json=$(printf '%s\n' "${KILLED[@]:-}" | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')
+  # backend pod -> node map at the end of the run, for scripts/rehoming-report.py (which
+  # flows had their backend on the disrupted node)
+  pods_json=$(kc -n default get pods -l app=echo -o jsonpath='{range .items[*]}{.metadata.name} {.status.podIP} {.spec.nodeName}{"\n"}{end}' 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.dumps([dict(zip(("name","ip","node"), l.split())) for l in sys.stdin if len(l.split())==3]))')
   cat > "${RESULTS_DIR}/${r}.meta.json" <<EOF
 {"cell":"${cell}","run":${run},"disruption":"${d}","algo":"${CUR_ALGO}","mode":"${CUR_MODE}",
  "etp":"${etp}","itp":"${itp}","target_node":"${TARGET_NODE}","ic_node":"${IC_NODE}",
  "kill_count":"${KILL_COUNT}","cilium_version":"${CILIUM_VERSION}","upgrade_to":"${UPGRADE_TO}",
  "max_unavailable":"${MAX_UNAVAILABLE}","run_label":"${RUN_LABEL}",
  "t0":${t0},"failtime":${failtime},"endtime":${endtime},"settle":${SETTLE},"dur":${dur},"flow_timeout":${FLOW_TIMEOUT},
- "truncated":${truncated},"killed":${killed_json}}
+ "truncated":${truncated},"killed":${killed_json},"pods":${pods_json:-[]}}
 EOF
   after_run "$d"
 }
@@ -581,4 +585,5 @@ done
 echo
 green "================ Test 5: Cilium disruption summary ================"
 python3 "${REPO_ROOT}/scripts/disruption-summary.py" "${RESULTS_DIR}" || yellow "summary failed"
+[ "$CAPTURE_PCAP" = "1" ] && { python3 "${REPO_ROOT}/scripts/rehoming-report.py" "${RESULTS_DIR}" || true; }
 green "Runtime: $(fmt_duration)"
