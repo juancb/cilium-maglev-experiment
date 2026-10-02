@@ -149,6 +149,17 @@ def main():
                 if dips:
                     verdict += f"; leaf1 saw {a.vip} drop to {min(x[1] for x in dips)} nexthops at {dips[0][0]}s..{dips[-1][0]}s"
             print(f"     => {verdict}" + (f"; {refresh} route refresh" if refresh else ""))
+        # bird -> leaves (uplink sessions, bird is the port-179 side on 10.3.x.y): did this
+        # node withdraw the VIP toward the fabric, and for how long? This is the direct ToR
+        # impact; the 0.25s leaf sampler can miss a sub-second flush.
+        up = [r for r in recs if r[2] == 179 and r[1].startswith("10.3.") and r[0] >= ft - 1]
+        wds = [r for r in up if a.vip + "/32" in r[5]["withdraw"]]
+        if wds:
+            print(f"   fabric: bird on {node} WITHDREW {a.vip} toward the leaves:")
+            for w in wds:
+                re_ann = [r for r in up if r[3] == w[3] and r[0] > w[0] and a.vip + "/32" in r[5]["announce"]]
+                gap = f"re-announced after {re_ann[0][0] - w[0]:.3f}s" if re_ann else "not re-announced in capture"
+                print(f"     +{w[0] - ft:7.2f}s  -> {w[3]} (leaf)  {gap}")
         # bird log
         bl = os.path.join(d, f"{tag}.bird.{node}.log")
         if os.path.exists(bl):
