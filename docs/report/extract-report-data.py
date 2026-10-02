@@ -1,7 +1,7 @@
 """Extract plot data + evidence excerpts for the report into report-data.json."""
 import json, glob, os, collections, statistics as st, re, sys
 os.chdir(r"G:\Documents\Development\cilium-maglev-experiment")
-S = os.path.dirname(os.path.abspath(__file__))  # pods.txt: pod->node map of the rehome batch (see docs/data/cilium-disruption-rehoming.md)
+S = os.path.dirname(os.path.abspath(__file__))
 out = {}
 
 def load(p):

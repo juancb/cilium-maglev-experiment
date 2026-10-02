@@ -42,6 +42,10 @@
 #   TARGET_NODE (node2)  IC_NODE (=TARGET_NODE)  KILL_COUNT (1 | all)
 #   CILIUM_VERSION (1.19.1)  UPGRADE_TO (unset; "latest" = newest patch of that minor)
 #   MAX_UNAVAILABLE (unset = chart default, 2): DaemonSet rollingUpdate.maxUnavailable
+#   CAPTURE_BGP (0): per-node capture of the bird<->Cilium BGP session (tcp/179 on lo),
+#     decoded with tcpdump -vv (OPEN/UPDATE/withdraws/End-of-RIB/Route Refresh), bird's
+#     log (needs `log "/var/log/bird.log" all;` in bird.conf), and each restarted agent
+#     pod's log: results/<run>.bgp.<node>.txt|.pcap, .bird.<node>.log, .agent.<node>.log
 #   CAPTURE_PCAP (1): per-node capture of client->VIP and node->backend packets, reduced
 #     to 1s buckets on the node; scripts/analyze-rehoming.py then labels every external
 #     flow re-homed/stayed and same/changed backend (results/<run>.ext-*.rehoming.json)
@@ -71,6 +75,7 @@ DUR_ROLLOUT="${DUR_ROLLOUT:-200}"; DUR_KILL="${DUR_KILL:-75}"; DUR_DELETE="${DUR
 FLOW_TIMEOUT="${FLOW_TIMEOUT:-30}"
 MAX_UNAVAILABLE="${MAX_UNAVAILABLE:-}"
 CAPTURE_PCAP="${CAPTURE_PCAP:-1}"
+CAPTURE_BGP="${CAPTURE_BGP:-0}"
 RUN_LABEL="${RUN_LABEL:-}"
 [ -n "$RUN_LABEL" ] && { RESULTS_DIR="${RESULTS_DIR}/${RUN_LABEL}"; mkdir -p "$RESULTS_DIR"; }
 STRICT_BGP="${STRICT_BGP:-0}"
@@ -390,6 +395,40 @@ dz_pcap_stop() {  # rtag
     done
   done
 }
+# ── BGP session capture (CAPTURE_BGP=1) ──────────────────────────────────────
+dz_bgp_start() {  # rtag
+  [ "$CAPTURE_BGP" = "1" ] || return 0
+  local n
+  for n in "${NODES[@]}"; do
+    docker exec "$n" sh -c "pkill -f 'tcpdump -i any -nn -s 0 -w /tmp/dz-bgp.pcap' 2>/dev/null; rm -f /tmp/dz-bgp.pcap; : > /var/log/bird.log 2>/dev/null; true"
+    docker exec -d "$n" tcpdump -i any -nn -s 0 -w /tmp/dz-bgp.pcap "tcp port 179" 2>/dev/null \
+      || yellow "  WARN: BGP tcpdump failed to start on ${n#${PFX}-}"
+  done
+}
+dz_bgp_stop() {  # rtag
+  [ "$CAPTURE_BGP" = "1" ] || return 0
+  local n node
+  for n in "${NODES[@]}"; do docker exec "$n" pkill -f "tcpdump -i any -nn -s 0 -w /tmp/dz-bgp.pcap" 2>/dev/null || true; done
+  sleep 2
+  for n in "${NODES[@]}"; do
+    node="${n#${PFX}-}"
+    docker exec "$n" sh -c "tcpdump -nn -tt -vv -r /tmp/dz-bgp.pcap 2>/dev/null" > "${RESULTS_DIR}/${1}.bgp.${node}.txt" 2>/dev/null || true
+    docker cp "${n}:/tmp/dz-bgp.pcap" "${RESULTS_DIR}/${1}.bgp.${node}.pcap" >/dev/null 2>&1 || true
+    docker exec "$n" sh -c "cat /var/log/bird.log 2>/dev/null" > "${RESULTS_DIR}/${1}.bird.${node}.log" 2>/dev/null || true
+  done
+}
+# the restarted agent pods' logs (the new pod for a rollout/delete; the restarted
+# container for a kill), written after the disruption has recovered
+dz_agent_logs() {  # rtag
+  [ "$CAPTURE_BGP" = "1" ] || return 0
+  local n node pod
+  for n in node1 node2 node3; do
+    pod=$(cilium_pod_on "$n")
+    [ -n "$pod" ] || continue
+    kc -n kube-system logs "$pod" -c cilium-agent --timestamps > "${RESULTS_DIR}/${1}.agent.${n}.log" 2>/dev/null || true
+  done
+}
+
 dz_rehoming() {  # rtag failtime -> prints, writes <rtag>.<pop>.rehoming.json
   [ "$CAPTURE_PCAP" = "1" ] || return 0
   local pop vip f tmp
@@ -456,6 +495,7 @@ run_once() {  # cell run disruption etp itp
   local dur="$DUR_KILL"
   case "$d" in agent-restart|agent-upgrade) dur="$DUR_ROLLOUT" ;; agent-delete) dur="$DUR_DELETE" ;; esac
   dz_pcap_start "$r"
+  dz_bgp_start "$r"
   local t0; t0=$(date +%s.%N)
   step "starting ${N} flows x3 populations + new-connection probes (${dur}s)"
   start_clients "$r" "$dur"
@@ -472,6 +512,7 @@ run_once() {  # cell run disruption etp itp
   failtime=$(date +%s.%N)
   disrupt "$d"
   endtime=$(date +%s.%N)
+  dz_agent_logs "$r"
   step "disruption over after $(python3 -c "print(round(${endtime}-${failtime},1))")s; settling ${SETTLE}s"
   sleep "$SETTLE"
 
@@ -484,6 +525,7 @@ run_once() {  # cell run disruption etp itp
   collect_clients "$r" "$left"
   touch "$stopf"; wait "$BGPW_PID" 2>/dev/null || true; BGPW_PID=""; rm -f "$stopf"
   dz_pcap_stop "$r"
+  dz_bgp_stop "$r"
   dz_rehoming "$r" "$failtime"
 
   local killed_json pods_json
