@@ -68,7 +68,7 @@ def parse_capture(path):
             continue
         if msg:
             if "End-of-Rib" in line or "End-of-RIB" in line:
-                msg["eor"] = True
+                msg["eor"] = True   # cleared below if the UPDATE carried NLRI (tcpdump labels any empty one)
             elif "Withdrawn routes" in line or "Unreach" in line:
                 section = "withdraw"
             elif "Updated routes" in line or "Reach NLRI" in line:
@@ -79,6 +79,9 @@ def parse_capture(path):
                 section = None   # another path attribute
     if msg:
         out.append((*cur, msg))
+    for rec in out:   # a withdraw-only UPDATE also prints "End-of-Rib Marker (empty NLRI)"; it is not the marker
+        if rec[5]["announce"] or rec[5]["withdraw"]:
+            rec[5]["eor"] = False
     # dedupe (lo traffic can appear twice under -i any)
     uniq = []
     for rec in out:
@@ -108,8 +111,8 @@ def main():
     for cap in sorted(glob.glob(os.path.join(d, f"{tag}.bgp.node?.txt"))):
         node = cap[-9:-4]
         recs = parse_capture(cap)
-        # agent -> bird: dport 179
-        tx = [r for r in recs if r[4] == 179 and r[0] >= ft - 1]
+        # agent -> bird: dport 179 on the node's own session (not a leaf -> bird uplink update)
+        tx = [r for r in recs if r[4] == 179 and not r[1].startswith("10.3.") and r[0] >= ft - 1]
         opens = [r for r in tx if r[5]["type"] == "Open"]
         print(f"-- {node}: {len(recs)} BGP messages in capture, {len(opens)} OPEN from the agent after failtime")
         for oi, op in enumerate(opens):
