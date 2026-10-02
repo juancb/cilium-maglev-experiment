@@ -199,10 +199,35 @@ restored to no-GR and re-verified.
   that node for ~1.5s exactly when the new agent re-peered, and the 63 SNAT flows
   ingressing that node re-homed and reset. The pod CIDR never blipped. A follow-up of
   **10 single-node pod replacements with GR on** (`results/gr-repeer/`, `agent-delete`)
-  showed **0 flows moved and 0 broken in all 10**. So it is 1 in 16 node restarts overall
-  and only seen while another node was restarting at the same time. It looks like the new
-  agent signalling End-of-RIB before its Service advertisements were in place. Not
-  confirmed against Cilium's reconciler; worth a Cilium issue if it can be reproduced.
+  showed **0 flows moved and 0 broken in all 10**. The next section captures the race.
+
+## End-of-RIB before the Service routes (captured, 1.19.1 vs 1.19.8)
+
+With GR the helper keeps the restarting peer's routes as stale and deletes whatever has
+not been re-advertised when End-of-RIB arrives (RFC 4724 §4.2). The order of the new
+agent's first messages therefore decides whether a VIP survives. `CAPTURE_BGP=1` records
+the bird↔Cilium session (tcp/179), bird's log and the restarted agent's log per node;
+`scripts/analyze-bgp-capture.py` prints each session's OPEN / UPDATE / End-of-RIB order,
+bird's withdrawals toward the leaves, and the agent's `Neighbor soft reset out` lines
+relative to the OPEN. Full table and both captured sequences:
+`docs/data/cilium-disruption-eor-services.md`.
+
+- **1.19.1, GR on**: 4 soft resets per agent start with 3 advertised prefixes, 24 with 23
+  (one per advertised Service), the last of them from 0.4 s before to 0.7 s after the
+  session OPEN. In **2 of 31** captured restarts the agent opened, announced only the pod
+  CIDR, sent End-of-RIB, and announced the VIPs with its soft resets afterwards. bird
+  logged `Got END-OF-RIB` / `Neighbor graceful restart done`, deleted the stale `.20` and
+  withdrew it from both leaves until the announce arrived: **0.65 s** (3 Services; 79 of
+  200 external flows re-hashed off the node and broke) and **5.84 s** (20 extra Services;
+  99 of 200 broke; leaf1 showed 2 nexthops for 3.3 s). The window is the service
+  reconciler's first pass, so it grows with the Service count.
+- **1.19.8, GR on**: 2 soft resets per start regardless of Service count, 1.3–1.8 s before
+  the OPEN, every prefix in the first UPDATE before End-of-RIB in **0 of 29** captured
+  restarts (rollouts, single-node deletes, three captured upgrades from 1.19.1, and four
+  deletes with 23 prefixes advertised). The 1.19.5 release notes carry the matching
+  change, "Reduce amount of soft peer resets by service reconciliation" (#45927).
+- **Captured upgrade 1.19.1 → 1.19.8 with GR on** (`results/eor-upgrade/`, 3 runs): 0%
+  broken and 0 re-homed in all three populations, no route gap.
 
 ## Follow-up batches
 
@@ -228,6 +253,19 @@ All GR off (prod mirror) unless stated. Tables in `docs/data/cilium-disruption-<
   side.
 - **GR on, 10 single-node pod replacements** (`gr-repeer/`): 0 / 0 / 0 broken, 0 stalled,
   0 re-homed, no route gap, in all 10.
+- **Twenty ClusterIP Services** (`svc20-*/`, `SVC_COUNT=20`, in-cluster flows 10 per
+  Service; one variant `ADVERTISE_CLUSTERIP=1` so each ClusterIP is a prefix in the
+  Cilium↔bird session, kept node-local by bird):
+  - GR off: rollouts broke 84 / 82 / 83.5% of in-cluster flows (63–68% with one Service)
+    and 100% of `.20`'s; single-node replacements 2.5 / 81.5 / 84% (node2 route gap 25 s,
+    28 s, 53 s). External populations unchanged.
+  - GR on: 0% external in 5 of 6 runs, the sixth being the 5.84 s End-of-RIB withdrawal
+    above (49.5%). In-cluster, **every 20-Service run lost 1–6% of flows to resets** (2 to
+    12 of 200), advertised or not, and 1–2% on 1.19.8; single-Service runs on either
+    version had none. The resets are spread over Services, backends and time, some well
+    after every agent is back, and no backend restarted. Not the route withdrawal; not
+    attributed here (conntrack / Hubble on the client node during an agent restart is the
+    place to look).
 
 ## Recommendations for the prod environment
 
@@ -237,9 +275,13 @@ All GR off (prod mirror) unless stated. Tables in `docs/data/cilium-disruption-<
    slowest agent pod start; 120s covered 85s here). bird's default already acts as helper,
    so this is a Cilium-side change only, and doesn't need GR or BFD on the fabric. In this
    lab it took every agent disruption from up to 100% broken to 0%.
+   - **Run 1.19.5 or later with it.** On 1.19.1 the new agent can send End-of-RIB before
+     its Service routes and the helper flushes the VIP for the length of the reconciler's
+     first pass (0.65 s with 3 Services, 5.84 s with 23, captured); 1.19.8 never did in
+     29 captured restarts (v1.19.5 #45927).
    - For VIPs, also originate them from bird statically (like `.21`) or otherwise
-     independently of the agent. That covers the re-peer race, and the case where the
-     agent is down longer than the restart timer.
+     independently of the agent. That covers any version, and the case where the agent
+     is down longer than the restart timer.
 2. **Use eTP=Local (and iTP=Local) for latency-sensitive services, but only if the VIP
    route is stable.** It removes the cross-node dependency, which eliminated ~70% breakage
    during rollouts. If the VIP can be withdrawn from a node, Local guarantees those flows
