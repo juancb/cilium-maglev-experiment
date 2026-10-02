@@ -519,13 +519,16 @@ start_clients() {  # rtag dur
     --hz "$PROBE_HZ" --duration "$d" --src "$SRC" --out "/tmp/${r}.probe-ext-static.json"
   if [ "$SVC_COUNT" -gt 0 ]; then
     # one flowgen per extra Service, N/SVC_COUNT flows each; merged into .int.json on collect
-    local i per cmd="" nn
+    # (the launcher goes in over stdin: 20 commands in one exec URL is too long for kubelet)
+    local i per nn launcher
     per=$(( N / SVC_COUNT )); [ "$per" -ge 1 ] || per=1
+    launcher=$(mktemp)
     for i in $(seq 1 "$SVC_COUNT"); do
       nn=$(printf %02d "$i")
-      cmd+="nohup python3 /opt/flowgen/flowgen.py --vip ${CLUSTER_IPS[$((i-1))]} --port ${VIP_PORT} --count ${per} --duration ${d} --timeout ${FLOW_TIMEOUT} --out /tmp/${r}.int-svc${nn}.json --ready-file /tmp/${r}.int-svc${nn}.ready >/tmp/${r}.int-svc${nn}.log 2>&1 & "
+      echo "nohup python3 /opt/flowgen/flowgen.py --vip ${CLUSTER_IPS[$((i-1))]} --port ${VIP_PORT} --count ${per} --duration ${d} --timeout ${FLOW_TIMEOUT} --out /tmp/${r}.int-svc${nn}.json --ready-file /tmp/${r}.int-svc${nn}.ready >/tmp/${r}.int-svc${nn}.log 2>&1 &" >> "$launcher"
     done
-    kc -n default exec flowgen-ic -- sh -c "${cmd}true"
+    kci -n default exec -i flowgen-ic -- sh -c "cat > /tmp/dz-launch.sh && sh /tmp/dz-launch.sh" < "$launcher"
+    rm -f "$launcher"
   else
     kc -n default exec flowgen-ic -- sh -c "nohup python3 /opt/flowgen/flowgen.py --vip ${CLUSTER_IP} --port ${VIP_PORT} \
       --count ${N} --duration ${d} --timeout ${FLOW_TIMEOUT} --out /tmp/${r}.int.json --ready-file /tmp/${r}.int.ready >/tmp/${r}.int.log 2>&1 &"
@@ -539,8 +542,9 @@ int_files() {  # -> the int population file stems in flowgen-ic
 }
 clients_ready() {  # rtag
   docker exec "$CLIENT" test -f "/tmp/$1.ext-cil.ready" && docker exec "$CLIENT" test -f "/tmp/$1.ext-static.ready" || return 1
-  local f
-  for f in $(int_files); do kc -n default exec flowgen-ic -- test -f "/tmp/$1.${f}.ready" 2>/dev/null || return 1; done
+  local readies; readies="$(int_files | sed "s|^|/tmp/$1.|; s|\$|.ready|" | tr '
+' ' ')"
+  kc -n default exec flowgen-ic -- sh -c "for f in ${readies}; do test -f \$f || exit 1; done" 2>/dev/null
 }
 
 collect_clients() {  # rtag timeout
