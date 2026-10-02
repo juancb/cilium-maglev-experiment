@@ -50,6 +50,14 @@
 #     to 1s buckets on the node; scripts/analyze-rehoming.py then labels every external
 #     flow re-homed/stayed and same/changed backend (results/<run>.ext-*.rehoming.json)
 #   RUN_LABEL (unset): write results under results/<RUN_LABEL>/ instead of results/
+#   SVC_COUNT (0): also create SVC_COUNT extra ClusterIP Services (echo-dz-svc-NN, same echo
+#     backends, label app=echo so Cilium's BGP service reconciler sees them). The int
+#     population is then spread over them (N/SVC_COUNT flows per Service, merged back into
+#     <run>.int.json with a "svc" field per flow; per-Service files kept as .int-svcNN.json).
+#     Models a cluster with many Services: more reconciler work per agent restart.
+#   ADVERTISE_CLUSTERIP (0): with SVC_COUNT, also advertise ClusterIPs over BGP
+#     (CiliumBGPAdvertisement addresses += ClusterIP), so every extra Service is a prefix
+#     in the Cilium<->bird session. Restored on exit.
 #   N (200 flows per population)  RUNS (2)  REPLICAS (6)  PROBE_HZ (10)
 #   DUR_ROLLOUT (200)  DUR_KILL (75)  DUR_DELETE (150)  SETTLE (15)  STRICT_BGP (0)
 #   FLOW_TIMEOUT (30): seconds a flow may stall before it counts as broken. A real TCP
@@ -77,6 +85,8 @@ MAX_UNAVAILABLE="${MAX_UNAVAILABLE:-}"
 CAPTURE_PCAP="${CAPTURE_PCAP:-1}"
 CAPTURE_BGP="${CAPTURE_BGP:-0}"
 RUN_LABEL="${RUN_LABEL:-}"
+SVC_COUNT="${SVC_COUNT:-0}"
+ADVERTISE_CLUSTERIP="${ADVERTISE_CLUSTERIP:-0}"
 [ -n "$RUN_LABEL" ] && { RESULTS_DIR="${RESULTS_DIR}/${RUN_LABEL}"; mkdir -p "$RESULTS_DIR"; }
 STRICT_BGP="${STRICT_BGP:-0}"
 BASE_VALUES="cilium-values-maglev.yaml"
@@ -137,7 +147,54 @@ set_policies() {  # etp itp
     kc -n default patch svc "$s" --type merge \
       -p "{\"spec\":{\"externalTrafficPolicy\":\"$1\",\"internalTrafficPolicy\":\"$2\"}}" >/dev/null
   done
+  for s in $(extra_svc_names); do   # ClusterIP Services only have an internalTrafficPolicy
+    kc -n default patch svc "$s" --type merge -p "{\"spec\":{\"internalTrafficPolicy\":\"$2\"}}" >/dev/null
+  done
   sleep 5
+}
+
+# ── Many-Services option (SVC_COUNT) ─────────────────────────────────────────
+extra_svc_names() { local i; for i in $(seq 1 "$SVC_COUNT"); do printf 'echo-dz-svc-%02d\n' "$i"; done; }
+
+apply_extra_services() {
+  [ "$SVC_COUNT" -gt 0 ] || return 0
+  step "creating ${SVC_COUNT} extra ClusterIP Services on the echo backends (advertise ClusterIP: ${ADVERTISE_CLUSTERIP})"
+  local s
+  for s in $(extra_svc_names); do
+    cat <<EOF
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${s}
+  namespace: default
+  labels: { app: echo, disruption: "true", dz-extra: "true" }
+spec:
+  type: ClusterIP
+  internalTrafficPolicy: Cluster
+  selector: { app: echo }
+  ports: [{ name: tcp, port: ${VIP_PORT}, targetPort: ${VIP_PORT}, protocol: TCP }]
+EOF
+  done | kci apply -f - >/dev/null
+  if [ "$ADVERTISE_CLUSTERIP" = "1" ]; then
+    kc patch ciliumbgpadvertisement vip-and-pods --type json \
+      -p '[{"op":"replace","path":"/spec/advertisements/0/service/addresses","value":["LoadBalancerIP","ClusterIP"]}]' >/dev/null
+    sleep 5
+  fi
+  CLUSTER_IPS=()
+  for s in $(extra_svc_names); do
+    CLUSTER_IPS+=("$(kc -n default get svc "$s" -o jsonpath='{.spec.clusterIP}')")
+  done
+  step "  int population spread over ${SVC_COUNT} ClusterIPs (${CLUSTER_IPS[0]} .. ${CLUSTER_IPS[-1]}), $((N / SVC_COUNT)) flows each"
+}
+
+remove_extra_services() {
+  [ "$SVC_COUNT" -gt 0 ] || return 0
+  kc -n default delete svc -l dz-extra=true --ignore-not-found >/dev/null 2>&1 || true
+  if [ "$ADVERTISE_CLUSTERIP" = "1" ]; then
+    kc patch ciliumbgpadvertisement vip-and-pods --type json \
+      -p '[{"op":"replace","path":"/spec/advertisements/0/service/addresses","value":["LoadBalancerIP"]}]' >/dev/null 2>&1 || true
+  fi
 }
 
 # ── Health gates ─────────────────────────────────────────────────────────────
@@ -239,7 +296,8 @@ EOF
 # Cilium disruption pulled routes out of the fabric.
 bgp_watch() {  # out stopfile
   set +e   # best-effort sampler: one failed docker exec must not kill it
-  local out="$1" stopf="$2" pcs=() n
+  local out="$1" stopf="$2" pcs=() n cip=""
+  [ "$ADVERTISE_CLUSTERIP" = "1" ] && [ "${#CLUSTER_IPS[@]}" -gt 0 ] && cip="${CLUSTER_IPS[0]}"
   for n in node1 node2 node3; do
     pcs+=("$(kc get ciliumnode "$n" -o jsonpath='{.spec.ipam.podCIDRs[0]}' 2>/dev/null)")
   done
@@ -252,19 +310,20 @@ bgp_watch() {  # out stopfile
     docker exec "${LEAVES[0]}" vtysh \
         -c "show ip route ${VIP_CIL}/32" -c "show ip route ${VIP_STATIC}/32" \
         -c "show ip route ${pcs[0]}" -c "show ip route ${pcs[1]}" -c "show ip route ${pcs[2]}" \
+        ${cip:+-c "show ip route ${cip}/32"} \
         > "$tmp/routes" 2>/dev/null &
     cilium_sessions "${NODES[0]}" > "$tmp/s1" &
     cilium_sessions "${NODES[1]}" > "$tmp/s2" &
     cilium_sessions "${NODES[2]}" > "$tmp/s3" &
     wait
-    routes=$(awk -v a="${VIP_CIL}/32" -v b="${VIP_STATIC}/32" -v p1="${pcs[0]}" -v p2="${pcs[1]}" -v p3="${pcs[2]}" '
+    routes=$(awk -v a="${VIP_CIL}/32" -v b="${VIP_STATIC}/32" -v p1="${pcs[0]}" -v p2="${pcs[1]}" -v p3="${pcs[2]}" -v c1="${cip:+${cip}/32}" '
                  /^Routing entry for/ {p=$4}
                  /^[[:space:]]+\* 10\./ {c[p]++}
-                 END {printf "%d,%d,%d,%d,%d", c[a], c[b], c[p1], c[p2], c[p3]}' "$tmp/routes")
+                 END {printf "%d,%d,%d,%d,%d,%d", c[a], c[b], c[p1], c[p2], c[p3], (c1==""?-1:c[c1])}' "$tmp/routes")
     s1=$(cat "$tmp/s1"); s2=$(cat "$tmp/s2"); s3=$(cat "$tmp/s3")
-    IFS=, read -r r1 r2 r3 r4 r5 <<<"$routes"
-    printf '{"t":%s,"vip_cil":%s,"vip_static":%s,"podcidr":{"node1":%s,"node2":%s,"node3":%s},"cilium_sess":{"node1":%s,"node2":%s,"node3":%s}}\n' \
-      "$ts" "${r1:-0}" "${r2:-0}" "${r3:-0}" "${r4:-0}" "${r5:-0}" "${s1:-0}" "${s2:-0}" "${s3:-0}" >> "$out"
+    IFS=, read -r r1 r2 r3 r4 r5 r6 <<<"$routes"
+    printf '{"t":%s,"vip_cil":%s,"vip_static":%s,"podcidr":{"node1":%s,"node2":%s,"node3":%s},"cilium_sess":{"node1":%s,"node2":%s,"node3":%s},"svc_cip":%s}\n' \
+      "$ts" "${r1:-0}" "${r2:-0}" "${r3:-0}" "${r4:-0}" "${r5:-0}" "${s1:-0}" "${s2:-0}" "${s3:-0}" "${r6:--1}" >> "$out"
     sleep 0.25
   done
   rm -rf "$tmp"
@@ -458,23 +517,39 @@ start_clients() {  # rtag dur
     --hz "$PROBE_HZ" --duration "$d" --src "$SRC" --out "/tmp/${r}.probe-ext-cil.json"
   docker exec -d "$CLIENT" python3 /opt/flowgen/connprobe.py --vip "$VIP_STATIC" --port "$VIP_PORT" \
     --hz "$PROBE_HZ" --duration "$d" --src "$SRC" --out "/tmp/${r}.probe-ext-static.json"
-  kc -n default exec flowgen-ic -- sh -c "nohup python3 /opt/flowgen/flowgen.py --vip ${CLUSTER_IP} --port ${VIP_PORT} \
-    --count ${N} --duration ${d} --timeout ${FLOW_TIMEOUT} --out /tmp/${r}.int.json --ready-file /tmp/${r}.int.ready >/tmp/${r}.int.log 2>&1 &"
+  if [ "$SVC_COUNT" -gt 0 ]; then
+    # one flowgen per extra Service, N/SVC_COUNT flows each; merged into .int.json on collect
+    local i per cmd="" nn
+    per=$(( N / SVC_COUNT )); [ "$per" -ge 1 ] || per=1
+    for i in $(seq 1 "$SVC_COUNT"); do
+      nn=$(printf %02d "$i")
+      cmd+="nohup python3 /opt/flowgen/flowgen.py --vip ${CLUSTER_IPS[$((i-1))]} --port ${VIP_PORT} --count ${per} --duration ${d} --timeout ${FLOW_TIMEOUT} --out /tmp/${r}.int-svc${nn}.json --ready-file /tmp/${r}.int-svc${nn}.ready >/tmp/${r}.int-svc${nn}.log 2>&1 & "
+    done
+    kc -n default exec flowgen-ic -- sh -c "${cmd}true"
+  else
+    kc -n default exec flowgen-ic -- sh -c "nohup python3 /opt/flowgen/flowgen.py --vip ${CLUSTER_IP} --port ${VIP_PORT} \
+      --count ${N} --duration ${d} --timeout ${FLOW_TIMEOUT} --out /tmp/${r}.int.json --ready-file /tmp/${r}.int.ready >/tmp/${r}.int.log 2>&1 &"
+  fi
   kc -n default exec flowgen-ic -- sh -c "nohup python3 /opt/flowgen/connprobe.py --vip ${CLUSTER_IP} --port ${VIP_PORT} \
     --hz ${PROBE_HZ} --duration ${d} --out /tmp/${r}.probe-int.json >/tmp/${r}.probe-int.log 2>&1 &"
 }
 
+int_files() {  # -> the int population file stems in flowgen-ic
+  if [ "$SVC_COUNT" -gt 0 ]; then seq -f "int-svc%02g" 1 "$SVC_COUNT"; else echo int; fi
+}
 clients_ready() {  # rtag
-  docker exec "$CLIENT" test -f "/tmp/$1.ext-cil.ready" && docker exec "$CLIENT" test -f "/tmp/$1.ext-static.ready" \
-    && kc -n default exec flowgen-ic -- test -f "/tmp/$1.int.ready" 2>/dev/null
+  docker exec "$CLIENT" test -f "/tmp/$1.ext-cil.ready" && docker exec "$CLIENT" test -f "/tmp/$1.ext-static.ready" || return 1
+  local f
+  for f in $(int_files); do kc -n default exec flowgen-ic -- test -f "/tmp/$1.${f}.ready" 2>/dev/null || return 1; done
 }
 
 collect_clients() {  # rtag timeout
   local r="$1" f i
+  local ints; ints="$(int_files | sed "s|^|/tmp/${r}.|; s|\$|.json|" | tr '\n' ' ')"
   for i in $(seq 1 "$2"); do
     docker exec "$CLIENT" test -s "/tmp/${r}.ext-cil.json" && docker exec "$CLIENT" test -s "/tmp/${r}.ext-static.json" \
       && docker exec "$CLIENT" test -s "/tmp/${r}.probe-ext-static.json" \
-      && kc -n default exec flowgen-ic -- test -s "/tmp/${r}.int.json" 2>/dev/null \
+      && kc -n default exec flowgen-ic -- sh -c "for f in ${ints}; do test -s \$f || exit 1; done" 2>/dev/null \
       && kc -n default exec flowgen-ic -- test -s "/tmp/${r}.probe-int.json" 2>/dev/null && break
     sleep 1
   done
@@ -482,10 +557,14 @@ collect_clients() {  # rtag timeout
     docker cp "${CLIENT}:/tmp/${r}.${f}.json" "${RESULTS_DIR}/${r}.${f}.json" >/dev/null 2>&1 \
       || yellow "  missing ${r}.${f}.json"
   done
-  for f in int probe-int; do
+  for f in $(int_files) probe-int; do
     kc -n default exec flowgen-ic -- cat "/tmp/${r}.${f}.json" > "${RESULTS_DIR}/${r}.${f}.json" 2>/dev/null \
       || { rm -f "${RESULTS_DIR}/${r}.${f}.json"; yellow "  missing ${r}.${f}.json"; }
   done
+  # many Services: merge the per-Service int files into one int population (flow["svc"] = NN)
+  if [ "$SVC_COUNT" -gt 0 ]; then
+    python3 "${REPO_ROOT}/scripts/merge-int-services.py" "$RESULTS_DIR" "$r" "$SVC_COUNT" || yellow "  int merge failed"
+  fi
 }
 
 run_once() {  # cell run disruption etp itp
@@ -540,6 +619,7 @@ run_once() {  # cell run disruption etp itp
  "etp":"${etp}","itp":"${itp}","target_node":"${TARGET_NODE}","ic_node":"${IC_NODE}",
  "kill_count":"${KILL_COUNT}","cilium_version":"${CILIUM_VERSION}","upgrade_to":"${UPGRADE_TO}",
  "max_unavailable":"${MAX_UNAVAILABLE}","run_label":"${RUN_LABEL}",
+ "svc_count":${SVC_COUNT},"advertise_clusterip":${ADVERTISE_CLUSTERIP},
  "t0":${t0},"failtime":${failtime},"endtime":${endtime},"settle":${SETTLE},"dur":${dur},"flow_timeout":${FLOW_TIMEOUT},
  "truncated":${truncated},"killed":${killed_json},"pods":${pods_json:-[]}}
 EOF
@@ -552,6 +632,7 @@ dz_cleanup() {
   [ -n "$BGPW_PID" ] && kill "$BGPW_PID" 2>/dev/null || true
   for n in node1 node2 node3; do kc uncordon "$n" >/dev/null 2>&1 || true; done
   set_policies Cluster Cluster 2>/dev/null || true
+  remove_extra_services
   kc -n default delete pod flowgen-ic --ignore-not-found --wait=false >/dev/null 2>&1 || true
   if [ -n "$CUR_ALGO" ] && { [ "$CUR_ALGO" != "maglev" ] || [ "$CUR_MODE" != "snat" ] || [ -n "$UPGRADE_TO" ]; }; then
     helm_cilium maglev snat "$CILIUM_VERSION" 2>/dev/null || true
@@ -589,7 +670,7 @@ n_cells=$(( n_a * n_m * n_p * n_d ))
 info "Test 5 (Cilium disruption): ${n_cells} cells x ${RUNS} runs | Cilium ${CILIUM_VERSION}${UPGRADE_TO:+ -> ${UPGRADE_TO}}"
 info "  algos=[${ALGOS}] modes=[${MODES}] policies(eTP:iTP)=[${POLICIES}] disruptions=[${DISRUPTIONS}]"
 info "  target=${TARGET_NODE} ic_node=${IC_NODE} kill_count=${KILL_COUNT} N=${N}/population replicas=${REPLICAS}"
-info "  max_unavailable=${MAX_UNAVAILABLE:-chart default} capture_pcap=${CAPTURE_PCAP} results=${RESULTS_DIR}"
+info "  max_unavailable=${MAX_UNAVAILABLE:-chart default} capture_pcap=${CAPTURE_PCAP} svc_count=${SVC_COUNT} advertise_clusterip=${ADVERTISE_CLUSTERIP} results=${RESULTS_DIR}"
 
 if ! verify_bgp; then
   [ "$STRICT_BGP" = "1" ] && { red "STRICT_BGP=1: fix BGP first (bash scripts/apply-bgp-config.sh)"; exit 1; }
@@ -600,6 +681,8 @@ docker exec "${NODES[0]}" birdc show route "${VIP_STATIC}/32" protocol vip 2>/de
 
 step "applying disruption services (.20 Cilium-originated, .21 bird-static) and spreading backends"
 kc apply -f /opt/k8s/echo-disruption.yaml >/dev/null
+CLUSTER_IPS=()
+apply_extra_services
 for n in node1 node2 node3; do kc uncordon "$n" >/dev/null 2>&1 || true; done
 kc -n default scale deploy/echo --replicas="$REPLICAS" >/dev/null
 kc -n default rollout restart deploy/echo >/dev/null
