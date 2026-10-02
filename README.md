@@ -108,7 +108,13 @@ KILL_COUNT=all DISRUPTIONS=backend-kill make test-disruption   # the node loses 
 MAX_UNAVAILABLE=1 DISRUPTIONS=agent-restart make test-disruption   # roll one node at a time
 DISRUPTIONS=agent-delete RUNS=10 make test-disruption          # one node's pod replaced, 10 times
 RUN_LABEL=mytry ... make test-disruption                       # results/mytry/ instead of results/
+CAPTURE_BGP=1 DISRUPTIONS=agent-delete RUNS=4 make test-disruption   # + bird<->Cilium session pcap, bird + agent logs
+SVC_COUNT=20 make test-disruption                              # 20 extra ClusterIP Services, in-cluster flows spread over them
+SVC_COUNT=20 ADVERTISE_CLUSTERIP=1 make test-disruption        # ... and advertise their ClusterIPs over BGP
 ```
+`CAPTURE_BGP=1` is what `scripts/analyze-bgp-capture.py` reads: per restarted node it prints the
+new agent's OPEN / UPDATE / End-of-RIB order, bird's withdrawals toward the leaves, and the
+agent's soft resets relative to the OPEN (see `docs/data/cilium-disruption-eor-services.md`).
 
 BGP mirrors prod: hold 90 s / keepalive 30 s on node↔leaf and bird↔Cilium, no BFD, and no
 explicit graceful restart (defaults: bird "aware", FRR helper, Cilium disabled). Without GR,
