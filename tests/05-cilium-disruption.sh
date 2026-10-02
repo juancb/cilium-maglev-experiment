@@ -400,7 +400,8 @@ dz_bgp_start() {  # rtag
   [ "$CAPTURE_BGP" = "1" ] || return 0
   local n
   for n in "${NODES[@]}"; do
-    docker exec "$n" sh -c "pkill -f 'tcpdump -i any -nn -s 0 -w /tmp/dz-bgp.pcap' 2>/dev/null; rm -f /tmp/dz-bgp.pcap; : > /var/log/bird.log 2>/dev/null; true"
+    # [t]cpdump: the pattern must not match the shell running this pkill (it would kill itself)
+    docker exec "$n" sh -c "pkill -f '[t]cpdump -i any -nn -s 0 -w /tmp/dz-bgp.pcap' 2>/dev/null; rm -f /tmp/dz-bgp.pcap; : > /var/log/bird.log 2>/dev/null; true"
     docker exec -d "$n" tcpdump -i any -nn -s 0 -w /tmp/dz-bgp.pcap "tcp port 179" 2>/dev/null \
       || yellow "  WARN: BGP tcpdump failed to start on ${n#${PFX}-}"
   done
@@ -408,7 +409,7 @@ dz_bgp_start() {  # rtag
 dz_bgp_stop() {  # rtag
   [ "$CAPTURE_BGP" = "1" ] || return 0
   local n node
-  for n in "${NODES[@]}"; do docker exec "$n" pkill -f "tcpdump -i any -nn -s 0 -w /tmp/dz-bgp.pcap" 2>/dev/null || true; done
+  for n in "${NODES[@]}"; do docker exec "$n" pkill -f "[t]cpdump -i any -nn -s 0 -w /tmp/dz-bgp.pcap" 2>/dev/null || true; done
   sleep 2
   for n in "${NODES[@]}"; do
     node="${n#${PFX}-}"
