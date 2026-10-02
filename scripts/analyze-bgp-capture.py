@@ -25,6 +25,7 @@ at leaf1 within a few seconds of each End-of-RIB.
 Usage: python3 scripts/analyze-bgp-capture.py <results-dir> <run-tag> [--vip 192.0.2.20]
 """
 import argparse
+import datetime
 import glob
 import json
 import os
@@ -157,15 +158,25 @@ def main():
                 print(f"   bird log ({len(hits)} relevant lines):")
                 for l in hits[:12]:
                     print("     " + l[:160])
-        # agent log
+        # agent log: when did the agent soft-reset the peer, relative to each session's OPEN?
         al = os.path.join(d, f"{tag}.agent.{node}.log")
         if os.path.exists(al):
             txt = open(al, errors="replace").read()
-            soft = len(re.findall(r"soft.?reset", txt, re.I)); rr = len(re.findall(r"route.?refresh", txt, re.I))
-            eor = len(re.findall(r"end.?of.?rib|\beor\b", txt, re.I)); gr = len(re.findall(r"graceful", txt, re.I))
-            print(f"   agent log: soft-reset {soft}, route-refresh {rr}, end-of-rib {eor}, graceful {gr} mentions")
-            for l in [l for l in txt.splitlines() if re.search(r"soft.?reset|route.?refresh|end.?of.?rib", l, re.I)][:6]:
-                print("     " + l[:170])
+            soft_ts = []
+            for l in txt.splitlines():
+                if re.search(r"soft.?reset", l, re.I):
+                    m = re.match(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?Z", l)
+                    if m:
+                        frac = (m.group(2) or "0")[:6].ljust(6, "0")   # 3.9's fromisoformat takes <= 6 digits
+                        soft_ts.append(datetime.datetime.fromisoformat(f"{m.group(1)}.{frac}").replace(tzinfo=datetime.timezone.utc).timestamp())
+            rr = len(re.findall(r"route.?refresh", txt, re.I)); gr = len(re.findall(r"graceful", txt, re.I))
+            rel = [round(t - ft, 2) for t in soft_ts]
+            after = []
+            for op in opens:
+                after += [round(t - ft, 2) for t in soft_ts if t > op[0] + 0.05]
+            print(f"   agent log: {len(soft_ts)} soft resets at {rel}; route-refresh {rr}, graceful {gr} mentions")
+            if after:
+                print(f"     !! soft reset(s) AFTER a session OPEN at {sorted(set(after))}: re-advertisement after End-of-RIB is possible")
     print(f"== flagged sessions (End-of-RIB before VIP announce): {flagged}")
 
 
